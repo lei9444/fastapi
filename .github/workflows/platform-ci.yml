@@ -10,6 +10,14 @@ on:
       - .github/isolated-platform-ci.md
       - scripts/isolated_platform_ci.py
       - scripts/tests/test_isolated_platform_ci.py
+      - .github/workflows/storage-ab.yml
+      - .github/storage-ab.md
+      - scripts/storage_ab.py
+      - scripts/storage_ab.ps1
+      - scripts/storage_ab_core.psm1
+      - scripts/storage_ab_native.psm1
+      - scripts/tests/storage_ab_guards.ps1
+      - scripts/tests/test_storage_ab.py
   workflow_dispatch:
 
 permissions: {}
