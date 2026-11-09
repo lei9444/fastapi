@@ -358,9 +358,7 @@ def test_architecture_failure_stops_before_installation(
     assert not (tmp_path / "dependencies.log").exists()
 
 
-def test_windows_uses_git_bash_not_wsl(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_windows_uses_git_bash_not_wsl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     git = tmp_path / "Git" / "cmd" / "git.exe"
     bash = tmp_path / "Git" / "bin" / "bash.exe"
     bash.parent.mkdir(parents=True)
