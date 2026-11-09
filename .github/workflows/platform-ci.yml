@@ -17,13 +17,15 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.platform }})
+    name: Test (${{ matrix.platform }}, repetition ${{ matrix.repetition }})
     permissions:
       contents: read
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        platform: [windows-x64, windows-arm64, linux-x64, macos-arm64]
+        repetition: [1, 2, 3]
         include:
           - platform: windows-x64
             runner: windows-2025
@@ -52,14 +54,15 @@ jobs:
         with:
           version: "latest-known"
           enable-cache: false
-      - name: Install dependencies and run the test suite
+      - name: Install dependencies, build distributions, and test
         run: python scripts/platform_ci.py run
         env:
           PLATFORM: ${{ matrix.platform }}
+          REPETITION: ${{ matrix.repetition }}
           RUNNER_LABEL: ${{ matrix.runner }}
           EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
       - name: Check reporting helper
-        if: ${{ !cancelled() && matrix.platform == 'linux-x64' }}
+        if: ${{ !cancelled() && matrix.platform == 'linux-x64' && matrix.repetition == 1 }}
         run: |
           status=0
           uv run --no-sync ruff check scripts/platform_ci.py scripts/tests/test_platform_ci.py || status=1
@@ -70,8 +73,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: platform-result-${{ matrix.platform }}-${{ github.run_attempt }}
-          path: platform-results/${{ matrix.platform }}
+          name: platform-result-${{ matrix.platform }}-${{ matrix.repetition }}-${{ github.run_attempt }}
+          path: platform-results/${{ matrix.platform }}-${{ matrix.repetition }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

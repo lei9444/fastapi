@@ -12,15 +12,19 @@ import sysconfig
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, fields
+from importlib.metadata import version
 from pathlib import Path
+from statistics import mean
 from typing import get_type_hints
 
 PLATFORMS = ("windows-x64", "windows-arm64", "linux-x64", "macos-arm64")
+REPETITIONS = (1, 2, 3)
 
 
 @dataclass
 class Result:
     platform: str
+    repetition: int
     status: str = "incomplete"
     commit: str = ""
     run_id: str = ""
@@ -42,6 +46,9 @@ class Result:
     memory_gib: float | None = None
     dependency_setup_seconds: float | None = None
     setup_exit_code: int | None = None
+    build_seconds: float | None = None
+    build_exit_code: int | None = None
+    build_backend_version: str = ""
     test_seconds: float | None = None
     test_exit_code: int | None = None
     tests: int | None = None
@@ -53,6 +60,21 @@ class Result:
     covered_lines: int | None = None
     missing_lines: int | None = None
     error: str = ""
+
+
+@dataclass
+class Average:
+    platform: str
+    commit: str
+    run_id: str
+    run_attempt: str
+    status: str
+    successful_runs: int
+    expected_runs: int
+    mean_dependency_setup_seconds: float | None
+    mean_build_seconds: float | None
+    mean_test_seconds: float | None
+    mean_coverage_percent: float | None
 
 
 def write_result(result: Result, output: Path) -> None:
@@ -154,14 +176,71 @@ def run_platform(result: Result, output: Path) -> int:
         return 1
 
     env = {**os.environ, "UV_PYTHON": sys.executable}
-    result.setup_exit_code, result.dependency_setup_seconds = run_command(
-        ["uv", "sync", "--locked", "--no-dev", "--group", "tests", "--extra", "all"],
-        output / "dependencies.log",
-        env,
+    venv_python = Path(".venv") / (
+        "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
     )
+    setup_seconds = 0.0
+    for command, log_name in (
+        (
+            [
+                "uv",
+                "sync",
+                "--locked",
+                "--no-dev",
+                "--group",
+                "tests",
+                "--extra",
+                "all",
+            ],
+            "dependencies.log",
+        ),
+        (
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(venv_python),
+                "--requirement",
+                ".github/platform-build-requirements.txt",
+            ],
+            "build-dependencies.log",
+        ),
+    ):
+        result.setup_exit_code, elapsed = run_command(command, output / log_name, env)
+        setup_seconds += elapsed
+        if result.setup_exit_code != 0:
+            break
+    result.dependency_setup_seconds = round(setup_seconds, 3)
     if result.setup_exit_code != 0:
         result.status = "setup_failed"
         result.error = f"Dependency installation exited {result.setup_exit_code}."
+        write_result(result, output)
+        return 1
+    write_result(result, output)
+
+    return_code, elapsed = run_command(
+        [
+            "uv",
+            "run",
+            "--no-sync",
+            "python",
+            "scripts/platform_ci.py",
+            "build",
+            "--output",
+            str(output),
+        ],
+        output / "build.log",
+        env,
+    )
+    result = read_result(output / "result.json")
+    result.build_exit_code = return_code
+    result.build_seconds = elapsed
+    if return_code != 0:
+        if result.status != "architecture_mismatch":
+            result.status = "build_failed"
+        if not result.error:
+            result.error = f"Build command exited {return_code}; see build.log."
         write_result(result, output)
         return 1
     write_result(result, output)
@@ -206,6 +285,47 @@ def find_bash() -> str:
     raise FileNotFoundError("Bash was not found on PATH.")
 
 
+def validate_distributions(path: Path) -> None:
+    for pattern in ("*.whl", "*.tar.gz"):
+        files = list(path.glob(pattern))
+        if len(files) != 1 or not files[0].is_file() or files[0].stat().st_size == 0:
+            raise ValueError(
+                f"Expected one non-empty {pattern} build output in {path}."
+            )
+
+
+def execute_build(output: Path) -> int:
+    result = read_result(output / "result.json")
+    record_interpreter(result)
+    result.build_backend_version = version("pdm-backend")
+    try:
+        verify_architecture(result)
+    except ValueError as exc:
+        result.status = "architecture_mismatch"
+        result.error = str(exc)
+        write_result(result, output)
+        print(result.error, file=sys.stderr)
+        return 1
+    write_result(result, output)
+    return_code = subprocess.call(
+        [
+            "uv",
+            "build",
+            "--sdist",
+            "--wheel",
+            "--no-build-isolation",
+            "--offline",
+            "--python",
+            sys.executable,
+            "--out-dir",
+            str(output / "dist"),
+        ]
+    )
+    if return_code == 0:
+        validate_distributions(output / "dist")
+    return return_code
+
+
 def execute_tests(output: Path) -> int:
     import psutil
 
@@ -224,6 +344,7 @@ def execute_tests(output: Path) -> int:
         return 1
     write_result(result, output)
     bash = find_bash()
+    context = f"{result.platform}-r{result.repetition}-py{result.python_version}"
     return subprocess.call(
         [
             bash,
@@ -237,7 +358,7 @@ def execute_tests(output: Path) -> int:
         env={
             **os.environ,
             "PATH": str(Path(bash).parent) + os.pathsep + os.environ["PATH"],
-            "CONTEXT": f"{result.platform}-py{result.python_version}",
+            "CONTEXT": context,
             "COVERAGE_FILE": str(output / ".coverage"),
             # Match xdist's psutil-based auto selection, and record the exact value.
             "PYTEST_XDIST_AUTO_NUM_WORKERS": str(result.workers),
@@ -287,24 +408,38 @@ def read_coverage(result: Result, path: Path) -> None:
 
 
 def collect_result(
-    source: Path, name: str, commit: str, run_id: str, attempt: str
+    source: Path,
+    name: str,
+    commit: str,
+    run_id: str,
+    attempt: str,
+    repetition: int = 1,
 ) -> Result:
-    output = source / f"platform-result-{name}-{attempt}"
-    result = Result(platform=name, commit=commit, run_id=run_id, run_attempt=attempt)
+    output = source / f"platform-result-{name}-{repetition}-{attempt}"
+    result = Result(
+        platform=name,
+        repetition=repetition,
+        commit=commit,
+        run_id=run_id,
+        run_attempt=attempt,
+    )
     try:
         saved = read_result(output / "result.json")
-        if (saved.platform, saved.commit, saved.run_id, saved.run_attempt) != (
-            name,
-            commit,
-            run_id,
-            attempt,
-        ):
+        if (
+            saved.platform,
+            saved.repetition,
+            saved.commit,
+            saved.run_id,
+            saved.run_attempt,
+        ) != (name, repetition, commit, run_id, attempt):
             raise ValueError(
-                "Result does not belong to this platform, commit, or run attempt."
+                "Result does not belong to this platform, repetition, commit, "
+                "or run attempt."
             )
         result = saved
         if result.status not in {
             "passed",
+            "build_failed",
             "tests_failed",
             "setup_failed",
             "architecture_mismatch",
@@ -314,11 +449,15 @@ def collect_result(
             verify_architecture(result)
             if (
                 result.setup_exit_code != 0
+                or result.build_exit_code != 0
                 or result.test_exit_code != 0
                 or result.dependency_setup_seconds is None
+                or result.build_seconds is None
                 or result.test_seconds is None
                 or result.dependency_setup_seconds < 0
+                or result.build_seconds < 0
                 or result.test_seconds < 0
+                or not result.build_backend_version
             ):
                 raise ValueError(
                     "Successful result is missing successful command evidence."
@@ -328,6 +467,13 @@ def collect_result(
         result.error = str(exc)
         return result
 
+    if result.build_exit_code == 0:
+        try:
+            validate_distributions(output / "dist")
+        except (OSError, ValueError) as exc:
+            result.error = f"{result.error} Build artifacts: {exc}".strip()
+            if result.status == "passed":
+                result.status = "incomplete"
     if result.test_exit_code is not None:
         for reader, filename in (
             (read_junit, "junit.xml"),
@@ -362,9 +508,47 @@ def aggregate(
     matrix_result: str,
 ) -> int:
     results = [
-        collect_result(source, name, commit, run_id, attempt) for name in PLATFORMS
+        collect_result(source, name, commit, run_id, attempt, repetition)
+        for name in PLATFORMS
+        for repetition in REPETITIONS
     ]
-    success = matrix_result == "success" and all(r.status == "passed" for r in results)
+    averages = []
+    for name in PLATFORMS:
+        passed = [r for r in results if r.platform == name and r.status == "passed"]
+        setup_times = [
+            r.dependency_setup_seconds
+            for r in passed
+            if r.dependency_setup_seconds is not None
+        ]
+        test_times = [r.test_seconds for r in passed if r.test_seconds is not None]
+        build_times = [r.build_seconds for r in passed if r.build_seconds is not None]
+        coverage = [
+            r.coverage_percent for r in passed if r.coverage_percent is not None
+        ]
+        complete = (
+            len(passed)
+            == len(setup_times)
+            == len(build_times)
+            == len(test_times)
+            == len(coverage)
+            == len(REPETITIONS)
+        )
+        averages.append(
+            Average(
+                platform=name,
+                commit=commit,
+                run_id=run_id,
+                run_attempt=attempt,
+                status="passed" if complete else "incomplete",
+                successful_runs=len(passed),
+                expected_runs=len(REPETITIONS),
+                mean_dependency_setup_seconds=mean(setup_times) if complete else None,
+                mean_build_seconds=mean(build_times) if complete else None,
+                mean_test_seconds=mean(test_times) if complete else None,
+                mean_coverage_percent=mean(coverage) if complete else None,
+            )
+        )
+    success = matrix_result == "success" and all(a.status == "passed" for a in averages)
     lines = [
         "# Platform CI reference report",
         "",
@@ -372,16 +556,42 @@ def aggregate(
         f"Overall: **{'passed' if success else 'failed / incomplete'}**. "
         f"Matrix job result: `{matrix_result}`.",
         "",
-        "Reference only: one execution per platform on free standard GitHub-hosted "
-        "runners with different hardware allocations. This is neither the HOBL "
-        "build-plus-test baseline nor a controlled OS/CPU architecture benchmark.",
+        f"Reference only: {len(REPETITIONS)} independent runner jobs per platform "
+        "on free standard GitHub-hosted runners with different hardware allocations. "
+        "This is neither the HOBL build-plus-test baseline nor a controlled "
+        "OS/CPU architecture benchmark.",
         "",
-        "| Platform | Status | Tests | Passed | Failures | Errors | Skipped | Coverage % | Dependencies (s) | Tests (s) |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "## Platform averages",
+        "",
+        "| Platform | Successful runs | Status | Mean coverage % | Mean dependencies (s) | Mean build (s) | Mean tests (s) |",
+        "|---|---:|---|---:|---:|---:|---:|",
+    ]
+    for a in averages:
+        values = (
+            a.platform,
+            f"{a.successful_runs}/{a.expected_runs}",
+            a.status,
+            a.mean_coverage_percent,
+            a.mean_dependency_setup_seconds,
+            a.mean_build_seconds,
+            a.mean_test_seconds,
+        )
+        lines.append("| " + " | ".join(cell(v) for v in values) + " |")
+    lines += [
+        "",
+        "Means are arithmetic averages of all three validated, successful "
+        "repetitions. If any repetition fails or is missing, that platform's "
+        "means are left blank rather than averaging only successful runs.",
+        "",
+        "## Individual runs",
+        "",
+        "| Platform | Repetition | Status | Tests | Passed | Failures | Errors | Skipped | Coverage % | Dependencies (s) | Build (s) | Tests (s) |",
+        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in results:
         values = (
             r.platform,
+            r.repetition,
             r.status,
             r.tests,
             r.passed,
@@ -390,27 +600,37 @@ def aggregate(
             r.skipped,
             r.coverage_percent,
             r.dependency_setup_seconds,
+            r.build_seconds,
             r.test_seconds,
         )
         lines.append("| " + " | ".join(cell(v) for v in values) + " |")
     lines += [
         "",
-        "Dependencies measures `uv sync --locked --no-dev --group tests --extra all` "
-        "(including downloads/builds). Tests measures the test command, including "
-        "interpreter/xdist startup and coverage reporting. Neither includes queueing, "
-        "checkout, Python/uv setup actions, or artifact transfers. Dependency caching "
-        "is disabled; hosted image/tool caches and network conditions can still differ.",
+        "Dependencies is the sum of the `uv sync --locked --no-dev --group tests "
+        "--extra all` and pinned build-backend installation command times, including "
+        "downloads and the editable project install. Build measures an additional "
+        "`uv build --sdist --wheel --no-build-isolation --offline` command through "
+        "the native Python wrapper, with build dependencies already installed. "
+        "Both distributions are built from the checkout. Tests measures the test "
+        "command, including interpreter/xdist startup and coverage reporting.",
         "",
-        "| Platform | Runner | Image version | OS release | Python | Interpreter / machine | CPUs logical / physical | Workers | RAM GiB |",
-        "|---|---|---|---|---|---|---|---:|---:|",
+        "These timings exclude queueing, checkout, Python/uv setup actions, and "
+        "artifact transfers. Dependency caching is disabled; hosted image/tool "
+        "caches and network conditions can still differ. The Build column is Python "
+        "package creation, not native compilation or a split of the editable install.",
+        "",
+        "| Platform | Repetition | Runner | Image version | OS release | Python | PDM backend | Interpreter / machine | CPUs logical / physical | Workers | RAM GiB |",
+        "|---|---:|---|---|---|---|---|---|---|---:|---:|",
     ]
     for r in results:
         environment = (
             r.platform,
+            r.repetition,
             r.runner_label,
             f"{r.image_os} {r.image_version}".strip(),
             r.os_release,
             r.python_version,
+            r.build_backend_version,
             f"{r.interpreter_platform} / {r.machine}",
             f"{cell(r.logical_cpus)} / {cell(r.physical_cpus)}",
             r.workers,
@@ -419,27 +639,44 @@ def aggregate(
         lines.append("| " + " | ".join(cell(v) for v in environment) + " |")
     lines += [
         "",
-        f"Download `platform-report-{attempt}` for `report.csv`, `report.json`, "
-        "and this Markdown report. Per-platform evidence artifacts contain command "
-        "logs, result metadata, JUnit XML, and coverage JSON/XML/database files.",
+        f"Download `platform-report-{attempt}` for `report.csv` (platform averages), "
+        "`runs.csv` (individual runs), `report.json`, and this Markdown report. "
+        "Each repetition's evidence artifact contains command logs, result metadata, "
+        "the wheel and sdist, JUnit XML, and coverage JSON/XML/database files.",
         "",
         "Coverage uses the upstream configuration (FastAPI, tests, and docs examples). "
         "This workflow does not replace the upstream combined 100%-coverage gate.",
     ]
     for r in results:
         if r.error:
-            lines += ["", f"**{r.platform}:** {cell(r.error)}"]
+            lines += [
+                "",
+                f"**{r.platform}, repetition {r.repetition}:** {cell(r.error)}",
+            ]
     summary = "\n".join(lines) + "\n"
     output.mkdir(parents=True, exist_ok=True)
     (output / "report.md").write_text(summary, encoding="utf-8")
     rows = [asdict(r) for r in results]
-    with (output / "report.csv").open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=[f.name for f in fields(Result)])
-        writer.writeheader()
-        writer.writerows(rows)
+    average_rows = [asdict(a) for a in averages]
+    for filename, records, record_type in (
+        ("report.csv", average_rows, Average),
+        ("runs.csv", rows, Result),
+    ):
+        with (output / filename).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=[f.name for f in fields(record_type)]
+            )
+            writer.writeheader()
+            writer.writerows(records)
     (output / "report.json").write_text(
         json.dumps(
-            {"success": success, "matrix_result": matrix_result, "results": rows},
+            {
+                "success": success,
+                "matrix_result": matrix_result,
+                "repetitions_per_platform": len(REPETITIONS),
+                "averages": average_rows,
+                "results": rows,
+            },
             indent=2,
         )
         + "\n",
@@ -456,10 +693,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run and report reference platform CI."
     )
-    parser.add_argument("command", choices=("run", "test", "report"))
+    parser.add_argument("command", choices=("run", "build", "test", "report"))
     parser.add_argument("--input", type=Path, default=Path("platform-artifacts"))
     parser.add_argument("--output", type=Path, default=Path("platform-report"))
     args = parser.parse_args()
+    if args.command == "build":
+        return execute_build(args.output)
     if args.command == "test":
         return execute_tests(args.output)
     if args.command == "report":
@@ -473,6 +712,7 @@ def main() -> int:
         )
     result = Result(
         platform=os.environ["PLATFORM"],
+        repetition=int(os.environ["REPETITION"]),
         commit=os.environ["GITHUB_SHA"],
         run_id=os.environ["GITHUB_RUN_ID"],
         run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
@@ -483,7 +723,9 @@ def main() -> int:
         image_version=os.environ.get("ImageVersion", ""),
         expected_architecture=os.environ["EXPECTED_ARCHITECTURE"],
     )
-    return run_platform(result, Path("platform-results") / result.platform)
+    return run_platform(
+        result, Path("platform-results") / f"{result.platform}-{result.repetition}"
+    )
 
 
 if __name__ == "__main__":
