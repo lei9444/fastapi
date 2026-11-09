@@ -661,7 +661,7 @@ def aggregate(
         lines.append("| " + " | ".join(common.cell(v) for v in values) + " |")
     lines += [
         "",
-        "| Layout | Trial | Inspection | Create volume | Copy/migrate | Configure paths | Postcheck | Workspace filesystem | Performance mode (actual) |",
+        "| Layout | Trial | Inspection | Create volume | Copy/migrate | Configure paths | Postcheck | Workspace filesystem | Performance mode setting |",
         "|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for trial in trials:
@@ -692,8 +692,10 @@ def aggregate(
         "",
         "No agent, base Python, VS/toolcache, GITHUB_WORKSPACE or RUNNER_TEMP is moved. "
         "No Defender exclusions, protection, trust, filter or tamper policies are changed. "
-        "ReFS and Dev Drive status are verified, not inferred; PerformanceMode 0 means Enabled "
-        "and 1 means Disabled. Missing or unapplied treatments are not valid ReFS samples.",
+        "ReFS and Dev Drive status are verified, not inferred. PerformanceModeStatus is read "
+        "from Get-MpPreference: 0 means Enabled and 1 means Disabled. This setting alone does "
+        "not prove asynchronous scanning occurred on a particular volume. Missing or unapplied "
+        "treatments are not valid ReFS samples.",
         "",
         "This is a bounded workflow-level Python experiment, not an image-wide fix or a Rust "
         "benchmark. Different fresh hosted machines and populated-copy filesystem warming can "

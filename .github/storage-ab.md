@@ -52,7 +52,9 @@ trial even when recovery succeeds.
 The running Actions agent, base Python, Visual Studio, hosted toolcache,
 `GITHUB_WORKSPACE`, and `RUNNER_TEMP` are not moved or reassigned. No Defender
 preference/exclusion, protection, filter, trust, or tamper setting is changed.
-Real-time protection and actual PerformanceMode are read before/after; status
+Real-time protection is read from `Get-MpComputerStatus`; `PerformanceModeStatus`
+is read from `Get-MpPreference` before/after. This is the configured setting, not
+proof that asynchronous scanning occurred on a particular volume. Status
 `0` means Enabled and `1` means Disabled. Missing protection metadata or an
 unexpected real-time-protection change is reported, not guessed away.
 

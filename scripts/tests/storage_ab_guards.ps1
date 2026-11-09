@@ -30,7 +30,7 @@ foreach ($path in @($corePath, $nativePath, $entryPath)) {
             Assert-AbTest ($name -notin @(
                 'Get-Disk', 'Get-Partition', 'Get-Volume', 'Initialize-Disk',
                 'New-Partition', 'Format-Volume', 'New-Item', 'Move-Item',
-                'Copy-Item', 'robocopy', 'Get-MpComputerStatus'
+                'Copy-Item', 'robocopy', 'Get-MpComputerStatus', 'Get-MpPreference'
             )) 'The mockable core must not contain native operations.'
         }
         if ($name -eq 'Format-Volume') {
@@ -48,6 +48,17 @@ foreach ($path in @($corePath, $nativePath, $entryPath)) {
                 ForEach-Object ParameterName)
             Assert-AbTest ('AssignDriveLetter' -in $parameters -and 'DriveLetter' -notin $parameters) 'Discover an assigned free drive letter.'
         }
+    }
+    if ($path -eq $nativePath) {
+        $modeReads = @($commands | Where-Object {
+            $_.GetCommandName() -eq 'Get-AbNativeProperty' -and
+            $_.CommandElements.Count -eq 3 -and
+            $_.CommandElements[2].Extent.Text -eq "'PerformanceModeStatus'"
+        })
+        Assert-AbTest ($modeReads.Count -eq 1 -and
+            $modeReads[0].CommandElements[1].Extent.Text -eq '$preferences') 'PerformanceModeStatus belongs to preferences, not computer status.'
+        $preferenceReads = @($commands | Where-Object { $_.GetCommandName() -eq 'Get-MpPreference' })
+        Assert-AbTest ($preferenceReads.Count -eq 1) 'Read the actual performance-mode preference without changing it.'
     }
 }
 

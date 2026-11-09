@@ -201,8 +201,9 @@ function Get-AbNativeInventory {
 function Get-AbNativeProtection {
     try {
         $status = Get-MpComputerStatus -ErrorAction Stop
+        $preferences = Get-MpPreference -ErrorAction Stop
         $realtime = Get-AbNativeProperty $status 'RealTimeProtectionEnabled'
-        $mode = Get-AbNativeProperty $status 'PerformanceModeStatus'
+        $mode = Get-AbNativeProperty $preferences 'PerformanceModeStatus'
         if ($mode -is [Enum]) { $mode = [int]$mode }
         if ($realtime -isnot [bool] -or -not (Test-AbInteger $mode) -or $mode -notin @(0, 1)) {
             $modeValue = if ($null -ne $mode) { Get-AbNativeProperty $mode 'value__' } else { $null }
