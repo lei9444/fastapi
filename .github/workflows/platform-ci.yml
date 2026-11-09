@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - lei9444-fastapi-platform-ci
+    paths-ignore:
+      - .github/workflows/isolated-platform-ci.yml
+      - .github/isolated-build-requirements.txt
+      - .github/isolated-platform-ci.md
+      - scripts/isolated_platform_ci.py
+      - scripts/tests/test_isolated_platform_ci.py
   workflow_dispatch:
 
 permissions: {}

@@ -1,0 +1,131 @@
+name: Isolated build loops reference report
+
+on:
+  push:
+    branches:
+      - lei9444-fastapi-platform-ci
+    paths:
+      - .github/workflows/isolated-platform-ci.yml
+      - .github/isolated-build-requirements.txt
+      - .github/isolated-platform-ci.md
+      - scripts/isolated_platform_ci.py
+      - scripts/tests/test_isolated_platform_ci.py
+      - scripts/platform_ci.py
+      - scripts/test.sh
+      - scripts/test-cov.sh
+      - fastapi/**
+      - docs_src/**
+      - tests/**
+      - pyproject.toml
+      - uv.lock
+      - .python-version
+  workflow_dispatch:
+    inputs:
+      loops:
+        description: Positive number of sequential build/test loops per runner
+        type: string
+        required: true
+        default: "3"
+
+permissions: {}
+
+env:
+  UV_NO_SYNC: true
+  UV_PYTHON_DOWNLOADS: never
+  UV_PYTHON: "3.13.17"
+  INLINE_SNAPSHOT_DEFAULT_FLAGS: review
+  PYTHONUNBUFFERED: "1"
+  LOOPS: ${{ inputs.loops }}
+
+jobs:
+  workload:
+    name: Isolated loops (${{ matrix.platform }})
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-2025
+            architecture: x64
+          - platform: windows-arm64
+            runner: windows-11-arm
+            architecture: arm64
+          - platform: linux-x64
+            runner: ubuntu-24.04
+            architecture: x64
+          - platform: macos-arm64
+            runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      RUNNER_LABEL: ${{ matrix.runner }}
+      EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          architecture: ${{ matrix.architecture }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "latest-known"
+          enable-cache: false
+      - name: Prepare workload environment and offline wheelhouse once
+        run: python -m scripts.isolated_platform_ci prepare
+      - name: Check reporting helpers before the measured loops
+        run: |
+          status=0
+          uv run --no-sync ruff check scripts/isolated_platform_ci.py scripts/tests/test_isolated_platform_ci.py || status=1
+          uv run --no-sync ruff format --diff scripts/isolated_platform_ci.py scripts/tests/test_isolated_platform_ci.py || status=1
+          uv run --no-sync ty check scripts/isolated_platform_ci.py scripts/tests/test_isolated_platform_ci.py || status=1
+          exit "$status"
+      - name: Run sequential isolated builds and tests
+        run: python -m scripts.isolated_platform_ci run
+      - name: Upload workload evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: isolated-result-${{ matrix.platform }}-${{ github.run_attempt }}
+          path: isolated-results/${{ matrix.platform }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    name: Aggregate isolated loop report
+    if: always()
+    needs: workload
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          architecture: x64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: isolated-result-*-${{ github.run_attempt }}
+          path: isolated-artifacts
+      - name: Publish isolated loop summary and CSVs
+        if: always()
+        run: python -m scripts.isolated_platform_ci report
+        env:
+          MATRIX_RESULT: ${{ needs.workload.result }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: isolated-report-${{ github.run_attempt }}
+          path: isolated-report
+          if-no-files-found: error
+          retention-days: 7

@@ -36,6 +36,9 @@ matrix, benchmarks, and combined 100%-coverage gate are unchanged.
 ## Running and downloading
 
 Pushes to the dedicated `lei9444-fastapi-platform-ci` branch trigger this workflow.
+Changes confined to the separate [isolated build loop workflow](isolated-platform-ci.md)
+and its dedicated helper, tests, requirements, and documentation are excluded.
+Shared source/dependencies and this workflow itself still trigger these checks.
 `workflow_dispatch` is also declared for future manual use, but GitHub only offers
 manual dispatch once the workflow exists on the default branch. The initial run
 does not require a default-branch change. No pull request or deployment is needed.
