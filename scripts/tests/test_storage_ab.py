@@ -25,8 +25,11 @@ def isolate_summary(monkeypatch: pytest.MonkeyPatch):
 
 def expected(layout: str = "default", trial: int = 1) -> dict:
     return {
-        "layout": layout, "trial": trial, "commit": SHA,
-        "run_id": "123", "run_attempt": "1",
+        "layout": layout,
+        "trial": trial,
+        "commit": SHA,
+        "run_id": "123",
+        "run_attempt": "1",
     }
 
 
@@ -37,42 +40,79 @@ def storage_record(layout: str, trial: int) -> dict:
     def path(name: str) -> dict:
         physical = drive + "\\ab\\" + name
         return {
-            "logical": physical, "physical": physical, "drive": drive,
+            "logical": physical,
+            "physical": physical,
+            "drive": drive,
             "filesystem": "ReFS" if refs else "NTFS",
-            "is_dev_drive": refs, "exists": True,
+            "is_dev_drive": refs,
+            "exists": True,
         }
 
-    paths = {name: path(name) for name in (
-        "workspace", "venv", "uv_cache", "pip_cache", "temp", "tmp", "wheelhouse"
-    )}
+    paths = {
+        name: path(name)
+        for name in (
+            "workspace",
+            "venv",
+            "uv_cache",
+            "pip_cache",
+            "temp",
+            "tmp",
+            "wheelhouse",
+        )
+    }
     paths["tmp"] = paths["temp"].copy()
     protection = {
-        "available": True, "realtime_protection_enabled": True,
-        "performance_mode_status": 1, "performance_mode": "Disabled",
+        "available": True,
+        "realtime_protection_enabled": True,
+        "performance_mode_status": 1,
+        "performance_mode": "Disabled",
     }
     return {
-        "requested_layout": layout, "trial": trial, "applied_layout": layout,
-        "status": "applied", "applied": True, "comparable": True, "reason": "",
+        "requested_layout": layout,
+        "trial": trial,
+        "applied_layout": layout,
+        "status": "applied",
+        "applied": True,
+        "comparable": True,
+        "reason": "",
         "context": {
-            "commit": SHA, "run_id": "123", "run_attempt": "1",
-            "repository": "lei9444/fastapi", "github_actions": "true",
-            "runner_environment": "github-hosted", "runner_os": "Windows",
-            "runner_arch": "ARM64", "os_arch": "Arm64",
-            "process_arch": "Arm64", "is_windows": True,
+            "commit": SHA,
+            "run_id": "123",
+            "run_attempt": "1",
+            "repository": "lei9444/fastapi",
+            "github_actions": "true",
+            "runner_environment": "github-hosted",
+            "runner_os": "Windows",
+            "runner_arch": "ARM64",
+            "os_arch": "Arm64",
+            "process_arch": "Arm64",
+            "is_windows": True,
         },
         "python": {"version": "3.13.17", "platform": "win-arm64", "pointer_bits": 64},
         "eligible_disk_count": 1,
         "selected_disk": {
-            "Number": 1, "BusType": "NVMe", "PartitionStyle": "RAW",
-            "NumberOfPartitions": 0, "Size": 100 * 1024**3,
-            "IsBoot": False, "IsSystem": False, "IsOffline": False, "IsReadOnly": False,
-            "eligible": True, "reasons": [],
-        } if refs else None,
-        "mutation_attempted": refs, "volume_verified": refs,
-        "workspace_migrated": refs, "backup_retained": refs,
+            "Number": 1,
+            "BusType": "NVMe",
+            "PartitionStyle": "RAW",
+            "NumberOfPartitions": 0,
+            "Size": 100 * 1024**3,
+            "IsBoot": False,
+            "IsSystem": False,
+            "IsOffline": False,
+            "IsReadOnly": False,
+            "eligible": True,
+            "reasons": [],
+        }
+        if refs
+        else None,
+        "mutation_attempted": refs,
+        "volume_verified": refs,
+        "workspace_migrated": refs,
+        "backup_retained": refs,
         "backup_path": "C:\\work\\repo.backup" if refs else None,
         "copy": {"verified": True, "source_digest": "e" * 64, "target_digest": "e" * 64}
-        if refs else None,
+        if refs
+        else None,
         "initial_cache_state": {
             name: {"fresh": True, "entries": 0}
             for name in ("uv_cache", "pip_cache", "temp", "wheelhouse")
@@ -81,16 +121,24 @@ def storage_record(layout: str, trial: int) -> dict:
         "environment": {
             "UV_CACHE_DIR": paths["uv_cache"]["physical"],
             "PIP_CACHE_DIR": paths["pip_cache"]["physical"],
-            "TEMP": paths["temp"]["physical"], "TMP": paths["temp"]["physical"],
+            "TEMP": paths["temp"]["physical"],
+            "TMP": paths["temp"]["physical"],
         },
-        "protection_before": deepcopy(protection), "protection_after": deepcopy(protection),
+        "protection_before": deepcopy(protection),
+        "protection_after": deepcopy(protection),
         "postcheck": {
-            "logical_workspace_unchanged": True, "paths": paths,
-            "uv": {"version": "uv 0.13.5 (fixture aarch64-pc-windows-msvc)", "architecture": "ARM64"},
-            "protection": deepcopy(protection), "backup_retained": refs,
+            "logical_workspace_unchanged": True,
+            "paths": paths,
+            "uv": {
+                "version": "uv 0.13.5 (fixture aarch64-pc-windows-msvc)",
+                "architecture": "ARM64",
+            },
+            "protection": deepcopy(protection),
+            "backup_retained": refs,
         },
         "timings": {
-            "inspection_seconds": 1.0, "creation_seconds": 5.0 if refs else None,
+            "inspection_seconds": 1.0,
+            "creation_seconds": 5.0 if refs else None,
             "migration_seconds": 20.0 if refs else None,
             "configuration_seconds": 1.0 if refs else 0.5,
             "postcheck_seconds": 3.0 if refs else 0.5,
@@ -123,22 +171,31 @@ def write_trial(root: Path, layout: str, number: int) -> Path:
     common.write_result(result, measurement / "loop-1")
     write_build(measurement / "loop-1")
     write_test_evidence(measurement / "loop-1")
-    (measurement / "dependencies.log").write_text("Installed locked packages.\n", encoding="utf-8")
+    (measurement / "dependencies.log").write_text(
+        "Installed locked packages.\n", encoding="utf-8"
+    )
     return folder
 
 
 def jobs() -> dict:
-    return {"jobs": [
-        {
-            "name": f"Storage A/B ({layout}, trial {number})",
-            "run_id": 123, "run_attempt": 1, "head_sha": SHA,
-            "status": "completed", "conclusion": "success",
-            "started_at": "2026-11-09T12:00:00Z",
-            "completed_at": "2026-11-09T12:02:50Z" if layout == "refs-devdrive"
-            else "2026-11-09T12:02:30Z",
-        }
-        for layout in ab.LAYOUTS for number in ab.TRIALS
-    ]}
+    return {
+        "jobs": [
+            {
+                "name": f"Storage A/B ({layout}, trial {number})",
+                "run_id": 123,
+                "run_attempt": 1,
+                "head_sha": SHA,
+                "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-11-09T12:00:00Z",
+                "completed_at": "2026-11-09T12:02:50Z"
+                if layout == "refs-devdrive"
+                else "2026-11-09T12:02:30Z",
+            }
+            for layout in ab.LAYOUTS
+            for number in ab.TRIALS
+        ]
+    }
 
 
 @pytest.mark.parametrize("layout", ab.LAYOUTS)
@@ -150,9 +207,24 @@ def test_valid_layout_has_actual_paths_and_not_inferred_protection(layout: str):
 
 @pytest.mark.parametrize(
     "problem",
-    ["unapplied", "not_comparable", "wrong_layout", "warm_cache", "not_devdrive",
-     "wrong_fs", "no_backup", "bad_copy", "system_disk", "unknown_mode", "uv_x64",
-     "wrong_trial", "local", "self_hosted", "different_volume"],
+    [
+        "unapplied",
+        "not_comparable",
+        "wrong_layout",
+        "warm_cache",
+        "not_devdrive",
+        "wrong_fs",
+        "no_backup",
+        "bad_copy",
+        "system_disk",
+        "unknown_mode",
+        "missing_storage_time",
+        "uv_x64",
+        "wrong_trial",
+        "local",
+        "self_hosted",
+        "different_volume",
+    ],
 )
 def test_invalid_treatment_is_not_a_valid_refs_sample(problem: str):
     data = storage_record("refs-devdrive", 1)
@@ -176,6 +248,8 @@ def test_invalid_treatment_is_not_a_valid_refs_sample(problem: str):
         data["selected_disk"]["IsSystem"] = True
     elif problem == "unknown_mode":
         data["protection_before"]["performance_mode_status"] = None
+    elif problem == "missing_storage_time":
+        data["timings"]["total_seconds"] = None
     elif problem == "uv_x64":
         data["postcheck"]["uv"]["architecture"] = "X64"
     elif problem == "wrong_trial":
@@ -203,7 +277,10 @@ def test_local_measurement_entry_is_rejected(monkeypatch: pytest.MonkeyPatch):
         ab.require_hosted_arm()
 
 
-@pytest.mark.parametrize("problem", ["missing", "duplicate", "wrong_sha", "wrong_attempt", "no_end", "negative"])
+@pytest.mark.parametrize(
+    "problem",
+    ["missing", "duplicate", "wrong_sha", "wrong_attempt", "no_end", "negative"],
+)
 def test_job_wall_metadata_must_be_real_and_match(problem: str):
     data = jobs()
     if problem == "missing":
@@ -262,7 +339,9 @@ def test_failed_job_keeps_observed_wall_time_but_is_not_valid(tmp_path: Path):
     write_trial(tmp_path, "default", 1)
     data = jobs()
     data["jobs"][0]["conclusion"] = "failure"
-    result, _ = ab.collect_trial(tmp_path, ab.Trial("default", 1, SHA, "123", "1"), data)
+    result, _ = ab.collect_trial(
+        tmp_path, ab.Trial("default", 1, SHA, "123", "1"), data
+    )
     assert result.job_wall_seconds == 150.0
     assert result.status == "incomplete"
     assert "failure" in result.error
@@ -283,12 +362,17 @@ def test_wheelhouse_mismatch_is_not_comparable(tmp_path: Path):
     assert all(row["mean_job_wall_seconds"] is None for row in summaries)
 
 
-def test_unapplied_refs_keeps_storage_cost_and_never_uses_control_fallback(tmp_path: Path):
+def test_unapplied_refs_keeps_storage_cost_and_never_uses_control_fallback(
+    tmp_path: Path,
+):
     folder = tmp_path / "storage-ab-refs-devdrive-1-1"
     data = storage_record("refs-devdrive", 1)
     data.update(
-        applied=False, comparable=False, applied_layout="default",
-        status="not_applied", reason="eligible_raw_nvme_count_0",
+        applied=False,
+        comparable=False,
+        applied_layout="default",
+        status="not_applied",
+        reason="eligible_raw_nvme_count_0",
     )
     ab.isolated.write_json(folder / "storage.json", data)
     row, _ = ab.collect_trial(

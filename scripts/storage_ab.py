@@ -144,6 +144,13 @@ def validate_applied_storage(storage: dict, expected: dict, postcheck: bool) -> 
         raise ValueError(
             storage.get("reason") or "Requested layout was not applied/comparable."
         )
+    phases = ["inspection", "configuration", "total"]
+    if expected["layout"] == "refs-devdrive":
+        phases += ["creation", "migration"]
+    if postcheck:
+        phases.append("postcheck")
+    for phase in phases:
+        metric(storage["timings"].get(phase + "_seconds"), f"storage {phase}")
     for name in ("uv_cache", "pip_cache", "temp", "wheelhouse"):
         initial = storage["initial_cache_state"][name]
         if (
@@ -221,7 +228,13 @@ def validate_applied_storage(storage: dict, expected: dict, postcheck: bool) -> 
     paths = check["paths"]
     workspace_drive = paths["workspace"]["drive"]
     for name in (
-        "workspace", "venv", "uv_cache", "pip_cache", "temp", "tmp", "wheelhouse",
+        "workspace",
+        "venv",
+        "uv_cache",
+        "pip_cache",
+        "temp",
+        "tmp",
+        "wheelhouse",
     ):
         info = paths[name]
         if info["exists"] is not True or info["drive"] != workspace_drive:
@@ -268,29 +281,54 @@ def prepare_trial(output: Path, wheelhouse: Path, storage_path: Path) -> int:
     commands = (
         (
             [
-                "uv", "sync", "--locked", "--no-dev", "--group", "tests",
-                "--extra", "all",
+                "uv",
+                "sync",
+                "--locked",
+                "--no-dev",
+                "--group",
+                "tests",
+                "--extra",
+                "all",
             ],
             "dependencies.log",
         ),
         (
             [
-                "uv", "pip", "install", "--python", python, "--requirement",
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                python,
+                "--requirement",
                 ".github/isolated-build-requirements.txt",
             ],
             "build-tools.log",
         ),
         (
             [
-                python, "-m", "pip", "download", "--only-binary=:all:",
-                "--dest", str(wheelhouse), f"pdm-backend=={isolated.TOOLS['pdm-backend']}",
+                python,
+                "-m",
+                "pip",
+                "download",
+                "--only-binary=:all:",
+                "--dest",
+                str(wheelhouse),
+                f"pdm-backend=={isolated.TOOLS['pdm-backend']}",
             ],
             "wheelhouse.log",
         ),
         (
             [
-                python, "-m", "scripts.storage_ab", "audit", "--output", str(output),
-                "--wheelhouse", str(wheelhouse), "--storage", str(storage_path),
+                python,
+                "-m",
+                "scripts.storage_ab",
+                "audit",
+                "--output",
+                str(output),
+                "--wheelhouse",
+                str(wheelhouse),
+                "--storage",
+                str(storage_path),
             ],
             "audit.log",
         ),
@@ -343,7 +381,9 @@ def finalize_trial(output: Path, bundle: Path, storage_path: Path) -> int:
 
 
 def metric(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Invalid measured {name}.")
+    if not math.isfinite(value) or value < 0:
         raise ValueError(f"Invalid measured {name}.")
     return float(value)
 
@@ -377,8 +417,11 @@ def job_wall_time(jobs: dict, expected: Trial) -> tuple[float, str]:
 def collect_trial(root: Path, trial: Trial, jobs: dict) -> tuple[Trial, dict]:
     folder = root / f"storage-ab-{trial.layout}-{trial.trial}-{trial.run_attempt}"
     expected = {
-        "layout": trial.layout, "trial": trial.trial, "commit": trial.commit,
-        "run_id": trial.run_id, "run_attempt": trial.run_attempt,
+        "layout": trial.layout,
+        "trial": trial.trial,
+        "commit": trial.commit,
+        "run_id": trial.run_id,
+        "run_attempt": trial.run_attempt,
     }
     storage = {}
     errors = []
@@ -393,7 +436,12 @@ def collect_trial(root: Path, trial: Trial, jobs: dict) -> tuple[Trial, dict]:
         check_storage_identity(storage, expected)
         trial.applied_layout = storage.get("applied_layout") or ""
         for key in (
-            "inspection", "creation", "migration", "configuration", "postcheck", "total",
+            "inspection",
+            "creation",
+            "migration",
+            "configuration",
+            "postcheck",
+            "total",
         ):
             value = storage["timings"].get(key + "_seconds")
             if value is not None:
@@ -437,8 +485,11 @@ def collect_trial(root: Path, trial: Trial, jobs: dict) -> tuple[Trial, dict]:
             json.dumps(audit["wheelhouse"], sort_keys=True).encode()
         ).hexdigest()
         identity_result = common.Result(
-            platform="windows-arm64", repetition=0, commit=trial.commit,
-            run_id=trial.run_id, run_attempt=trial.run_attempt,
+            platform="windows-arm64",
+            repetition=0,
+            commit=trial.commit,
+            run_id=trial.run_id,
+            run_attempt=trial.run_attempt,
         )
         setup = common.read_result(output / "setup.json")
         isolated.check_identity(setup, identity_result, 0)
@@ -449,7 +500,12 @@ def collect_trial(root: Path, trial: Trial, jobs: dict) -> tuple[Trial, dict]:
         trial.build_seconds = result.build_seconds
         trial.test_seconds = result.test_seconds
         for name in (
-            "tests", "passed", "failures", "errors", "skipped", "coverage_percent",
+            "tests",
+            "passed",
+            "failures",
+            "errors",
+            "skipped",
+            "coverage_percent",
         ):
             setattr(trial, name, getattr(result, name))
         if result.status != "passed":
@@ -467,8 +523,11 @@ def collect_trial(root: Path, trial: Trial, jobs: dict) -> tuple[Trial, dict]:
 def build_summary(trials: list[Trial]) -> tuple[list[dict], dict]:
     summaries = []
     metrics = (
-        "storage_total_seconds", "setup_seconds", "build_seconds",
-        "test_seconds", "job_wall_seconds",
+        "storage_total_seconds",
+        "setup_seconds",
+        "build_seconds",
+        "test_seconds",
+        "job_wall_seconds",
     )
     for layout in LAYOUTS:
         rows = [row for row in trials if row.layout == layout]
@@ -479,7 +538,9 @@ def build_summary(trials: list[Trial]) -> tuple[list[dict], dict]:
             and all(getattr(row, name) is not None for row in valid for name in metrics)
         )
         summary = {
-            "layout": layout, "valid_trials": len(valid), "expected_trials": 3,
+            "layout": layout,
+            "valid_trials": len(valid),
+            "expected_trials": 3,
             "status": "passed" if complete else "incomplete",
         }
         for name in metrics:
@@ -499,22 +560,32 @@ def build_summary(trials: list[Trial]) -> tuple[list[dict], dict]:
                 summary["mean_" + name] = None
     comparison = {
         "comparable": comparable,
-        "reason": "" if comparable else "Both groups need three valid successful trials and identical tool/lock/wheelhouse inputs.",
+        "reason": ""
+        if comparable
+        else "Both groups need three valid successful trials and identical tool/lock/wheelhouse inputs.",
     }
     for name in metrics:
-        baseline = summaries[0]["mean_" + name]
-        treatment = summaries[1]["mean_" + name]
-        comparison[name + "_delta"] = treatment - baseline if comparable else None
-        comparison[name + "_reduction_percent"] = (
-            (baseline - treatment) / baseline * 100
-            if comparable and baseline > 0 else None
-        )
+        if comparable:
+            baseline = metric(summaries[0]["mean_" + name], name)
+            treatment = metric(summaries[1]["mean_" + name], name)
+            comparison[name + "_delta"] = treatment - baseline
+            comparison[name + "_reduction_percent"] = (
+                (baseline - treatment) / baseline * 100 if baseline > 0 else None
+            )
+        else:
+            comparison[name + "_delta"] = None
+            comparison[name + "_reduction_percent"] = None
     return summaries, comparison
 
 
 def aggregate(
-    source: Path, output: Path, job_file: Path, commit: str,
-    run_id: str, attempt: str, matrix_result: str,
+    source: Path,
+    output: Path,
+    job_file: Path,
+    commit: str,
+    run_id: str,
+    attempt: str,
+    matrix_result: str,
 ) -> int:
     try:
         jobs = load_json(job_file)
@@ -547,9 +618,12 @@ def aggregate(
     ]
     for summary in summaries:
         values = (
-            summary["layout"], f"{summary['valid_trials']}/3",
-            summary["mean_storage_total_seconds"], summary["mean_setup_seconds"],
-            summary["mean_build_seconds"], summary["mean_test_seconds"],
+            summary["layout"],
+            f"{summary['valid_trials']}/3",
+            summary["mean_storage_total_seconds"],
+            summary["mean_setup_seconds"],
+            summary["mean_build_seconds"],
+            summary["mean_test_seconds"],
             summary["mean_job_wall_seconds"],
         )
         lines.append("| " + " | ".join(common.cell(v) for v in values) + " |")
@@ -572,9 +646,15 @@ def aggregate(
     ]
     for trial in trials:
         values = (
-            trial.layout, trial.trial, trial.applied_layout, trial.status,
-            trial.storage_total_seconds, trial.setup_seconds, trial.build_seconds,
-            trial.test_seconds, trial.job_wall_seconds,
+            trial.layout,
+            trial.trial,
+            trial.applied_layout,
+            trial.status,
+            trial.storage_total_seconds,
+            trial.setup_seconds,
+            trial.build_seconds,
+            trial.test_seconds,
+            trial.job_wall_seconds,
             f"{common.cell(trial.passed)} / {common.cell(trial.skipped)}",
             trial.coverage_percent,
         )
@@ -586,10 +666,15 @@ def aggregate(
     ]
     for trial in trials:
         values = (
-            trial.layout, trial.trial, trial.storage_inspection_seconds,
-            trial.storage_creation_seconds, trial.storage_migration_seconds,
-            trial.storage_configuration_seconds, trial.storage_postcheck_seconds,
-            trial.workspace_filesystem, trial.performance_mode,
+            trial.layout,
+            trial.trial,
+            trial.storage_inspection_seconds,
+            trial.storage_creation_seconds,
+            trial.storage_migration_seconds,
+            trial.storage_configuration_seconds,
+            trial.storage_postcheck_seconds,
+            trial.workspace_filesystem,
+            trial.performance_mode,
         )
         lines.append("| " + " | ".join(common.cell(v) for v in values) + " |")
     lines += [
@@ -623,7 +708,8 @@ def aggregate(
     for trial in trials:
         if trial.error:
             lines += [
-                "", f"**{trial.layout} #{trial.trial}:** {common.cell(trial.error)}",
+                "",
+                f"**{trial.layout} #{trial.trial}:** {common.cell(trial.error)}",
             ]
     isolated.publish_summary(output, "\n".join(lines) + "\n")
     for filename, rows, columns in (
@@ -642,9 +728,12 @@ def aggregate(
     isolated.write_json(
         output / "report.json",
         {
-            "success": success, "matrix_result": matrix_result,
-            "summaries": summaries, "comparison": comparison,
-            "trials": [asdict(row) for row in trials], "storage": storage_details,
+            "success": success,
+            "matrix_result": matrix_result,
+            "summaries": summaries,
+            "comparison": comparison,
+            "trials": [asdict(row) for row in trials],
+            "storage": storage_details,
         },
     )
     return int(not success)
@@ -666,8 +755,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "report":
         return aggregate(
-            args.input, args.output, args.jobs, os.environ["GITHUB_SHA"],
-            os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"],
+            args.input,
+            args.output,
+            args.jobs,
+            os.environ["GITHUB_SHA"],
+            os.environ["GITHUB_RUN_ID"],
+            os.environ["GITHUB_RUN_ATTEMPT"],
             os.environ["MATRIX_RESULT"],
         )
     require_hosted_arm()

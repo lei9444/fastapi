@@ -81,7 +81,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $status = 1 }
           uv tool run --python 3.13.17 --from ruff==0.16.8 ruff format --diff scripts/storage_ab.py scripts/tests/test_storage_ab.py
           if ($LASTEXITCODE -ne 0) { $status = 1 }
-          uv tool run --python 3.13.17 --from ty==0.0.78 --with pytest==9.1.1 --with psutil==7.2.2 ty check scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          uv run --no-project --isolated --python 3.13.17 --with ty==0.0.78 --with pytest==9.1.1 --with psutil==7.2.2 python -c "import subprocess,sys; raise SystemExit(subprocess.call(['ty','check','--python',sys.executable,'scripts/storage_ab.py','scripts/tests/test_storage_ab.py']))"
           if ($LASTEXITCODE -ne 0) { $status = 1 }
           exit $status
       - name: Apply guarded experimental storage layout
