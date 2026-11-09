@@ -457,8 +457,7 @@ def test_build_is_offline_with_prepared_backend(
         ]
     ]
     assert (
-        platform_ci.read_result(output / "result.json").build_backend_version
-        == "2.5.0"
+        platform_ci.read_result(output / "result.json").build_backend_version == "2.5.0"
     )
 
 
