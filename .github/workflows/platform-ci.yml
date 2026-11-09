@@ -11,6 +11,7 @@ permissions: {}
 env:
   UV_NO_SYNC: true
   UV_PYTHON_DOWNLOADS: never
+  UV_PYTHON: "3.13.17"
   INLINE_SNAPSHOT_DEFAULT_FLAGS: review
   PYTHONUNBUFFERED: "1"
 
@@ -44,7 +45,7 @@ jobs:
       - name: Set up native Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
+          python-version: ${{ env.UV_PYTHON }}
           architecture: ${{ matrix.architecture }}
       - name: Set up uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
@@ -60,9 +61,11 @@ jobs:
       - name: Check reporting helper
         if: ${{ !cancelled() && matrix.platform == 'linux-x64' }}
         run: |
-          uv run --no-sync --python 3.13 ruff check scripts/platform_ci.py scripts/tests/test_platform_ci.py
-          uv run --no-sync --python 3.13 ruff format --diff scripts/platform_ci.py scripts/tests/test_platform_ci.py
-          uv run --no-sync --python 3.13 ty check scripts/platform_ci.py scripts/tests/test_platform_ci.py
+          status=0
+          uv run --no-sync ruff check scripts/platform_ci.py scripts/tests/test_platform_ci.py || status=1
+          uv run --no-sync ruff format --diff scripts/platform_ci.py scripts/tests/test_platform_ci.py || status=1
+          uv run --no-sync ty check scripts/platform_ci.py scripts/tests/test_platform_ci.py || status=1
+          exit "$status"
       - name: Upload platform evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -87,7 +90,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
+          python-version: ${{ env.UV_PYTHON }}
           architecture: x64
       - name: Download platform evidence
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

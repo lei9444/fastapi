@@ -107,7 +107,8 @@ def test_successful_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     output = tmp_path / "report"
     assert (
-        platform_ci.aggregate(tmp_path, output, "test-commit", "123", "1", "success") == 0
+        platform_ci.aggregate(tmp_path, output, "test-commit", "123", "1", "success")
+        == 0
     )
     with (output / "report.csv").open(newline="", encoding="utf-8") as stream:
         rows = list(csv.DictReader(stream))
@@ -123,7 +124,8 @@ def test_successful_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert "Reference only" in text
     assert "HOBL" in text
     assert (
-        json.loads((output / "report.json").read_text(encoding="utf-8"))["success"] is True
+        json.loads((output / "report.json").read_text(encoding="utf-8"))["success"]
+        is True
     )
 
 
@@ -155,7 +157,9 @@ def test_rejects_mismatched_results(tmp_path: Path, field: str):
     result = sample_result("linux-x64")
     setattr(result, field, "different")
     platform_ci.write_result(result, output)
-    collected = platform_ci.collect_result(tmp_path, "linux-x64", "test-commit", "123", "1")
+    collected = platform_ci.collect_result(
+        tmp_path, "linux-x64", "test-commit", "123", "1"
+    )
     assert collected.status == "incomplete"
     assert "does not belong" in collected.error
 
@@ -176,7 +180,9 @@ def test_invalid_result_field_types_fail(tmp_path: Path, field: str, value: obje
     data = json.loads(path.read_text(encoding="utf-8"))
     data[field] = value
     path.write_text(json.dumps(data), encoding="utf-8")
-    result = platform_ci.collect_result(tmp_path, "linux-x64", "test-commit", "123", "1")
+    result = platform_ci.collect_result(
+        tmp_path, "linux-x64", "test-commit", "123", "1"
+    )
     assert result.status == "incomplete"
     assert field in result.error
 
@@ -190,9 +196,16 @@ def test_failed_tests_keep_counts_and_coverage(tmp_path: Path):
     (output / "junit.xml").write_text(
         '<testsuite tests="5" failures="1" errors="1" skipped="1"/>', encoding="utf-8"
     )
-    collected = platform_ci.collect_result(tmp_path, "linux-x64", "test-commit", "123", "1")
+    collected = platform_ci.collect_result(
+        tmp_path, "linux-x64", "test-commit", "123", "1"
+    )
     assert collected.status == "tests_failed"
-    assert (collected.tests, collected.passed, collected.failures, collected.errors) == (
+    assert (
+        collected.tests,
+        collected.passed,
+        collected.failures,
+        collected.errors,
+    ) == (
         5,
         2,
         1,
@@ -206,7 +219,9 @@ def test_junit_failure_overrides_zero_exit_code(tmp_path: Path):
     (output / "junit.xml").write_text(
         '<testsuite tests="2" failures="1" errors="0" skipped="0"/>', encoding="utf-8"
     )
-    collected = platform_ci.collect_result(tmp_path, "linux-x64", "test-commit", "123", "1")
+    collected = platform_ci.collect_result(
+        tmp_path, "linux-x64", "test-commit", "123", "1"
+    )
     assert collected.status == "tests_failed"
     assert "despite a successful command exit" in collected.error
 
@@ -268,7 +283,8 @@ def test_matrix_failure_is_not_hidden(tmp_path: Path, matrix_result: str):
 def test_missing_artifacts_still_publish_all_platforms(tmp_path: Path):
     output = tmp_path / "report"
     assert (
-        platform_ci.aggregate(tmp_path, output, "test-commit", "123", "1", "failure") == 1
+        platform_ci.aggregate(tmp_path, output, "test-commit", "123", "1", "failure")
+        == 1
     )
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert report["success"] is False
@@ -314,7 +330,14 @@ def test_setup_failure_stops_before_tests(
     assert platform_ci.run_platform(sample_result("windows-arm64"), tmp_path) == 1
     assert len(calls) == 1
     assert calls[0] == [
-        "uv", "sync", "--locked", "--no-dev", "--group", "tests", "--extra", "all"
+        "uv",
+        "sync",
+        "--locked",
+        "--no-dev",
+        "--group",
+        "tests",
+        "--extra",
+        "all",
     ]
     result = platform_ci.read_result(tmp_path / "result.json")
     assert result.status == "setup_failed"
@@ -328,5 +351,40 @@ def test_architecture_failure_stops_before_installation(
     result.interpreter_platform = "win-amd64"
     monkeypatch.setattr(platform_ci, "record_interpreter", lambda result: None)
     assert platform_ci.run_platform(result, tmp_path) == 1
-    assert platform_ci.read_result(tmp_path / "result.json").status == "architecture_mismatch"
+    assert (
+        platform_ci.read_result(tmp_path / "result.json").status
+        == "architecture_mismatch"
+    )
     assert not (tmp_path / "dependencies.log").exists()
+
+
+def test_windows_uses_git_bash_not_wsl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    git = tmp_path / "Git" / "cmd" / "git.exe"
+    bash = tmp_path / "Git" / "bin" / "bash.exe"
+    bash.parent.mkdir(parents=True)
+    bash.touch()
+    executables = {"git": str(git), "bash": "C:\\Windows\\System32\\bash.exe"}
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(platform_ci.shutil, "which", executables.get)
+    assert platform_ci.find_bash() == str(bash)
+
+
+@pytest.mark.parametrize("git", [None, "missing-git.exe"])
+def test_windows_missing_git_bash_is_explicit(
+    monkeypatch: pytest.MonkeyPatch, git: str | None
+):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(platform_ci.shutil, "which", lambda name: git)
+    with pytest.raises(FileNotFoundError, match="Git for Windows Bash"):
+        platform_ci.find_bash()
+
+
+def test_posix_bash_lookup(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform_ci.shutil, "which", lambda name: "/bin/bash")
+    assert platform_ci.find_bash() == "/bin/bash"
+    monkeypatch.setattr(platform_ci.shutil, "which", lambda name: None)
+    with pytest.raises(FileNotFoundError, match="Bash was not found"):
+        platform_ci.find_bash()

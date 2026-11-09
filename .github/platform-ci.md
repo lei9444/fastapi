@@ -10,7 +10,7 @@ on four free standard GitHub-hosted runners in this public fork:
 | Linux x64 | `ubuntu-24.04` | `x64` |
 | macOS ARM64 | `macos-15` | `arm64` |
 
-It uses Python 3.13 and the committed dependency lock file. Both the setup
+It uses Python 3.13.17 and the committed dependency lock file. Both the setup
 interpreter and the test environment are checked against the requested native
 architecture, including the Windows interpreter build tag to reject x64
 emulation. The report records the actual Python version, runner image, OS release,
@@ -20,6 +20,7 @@ evidence comes only from hosted CI, never from local experiment files.
 The test command remains `scripts/test-cov.sh`: the full `tests` and
 `scripts/tests` suites with `-n auto --dist loadgroup` and coverage contexts.
 The helper records xdist's physical-CPU-based automatic worker count explicitly.
+On Windows it selects Git Bash explicitly, rather than the WSL launcher.
 No tests or assertions are removed, and the existing Test workflow, its dependency
 matrix, benchmarks, and combined 100%-coverage gate are unchanged.
 

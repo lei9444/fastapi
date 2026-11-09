@@ -4,6 +4,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import struct
 import subprocess
 import sys
@@ -112,7 +113,9 @@ def verify_architecture(result: Result) -> None:
         )
 
 
-def run_command(command: list[str], log: Path, env: dict[str, str]) -> tuple[int, float]:
+def run_command(
+    command: list[str], log: Path, env: dict[str, str]
+) -> tuple[int, float]:
     started = time.perf_counter()
     with log.open("w", encoding="utf-8") as stream:
         try:
@@ -183,9 +186,24 @@ def run_platform(result: Result, output: Path) -> int:
     if result.status != "architecture_mismatch":
         result.status = "passed" if return_code == 0 else "tests_failed"
     if return_code != 0 and not result.error:
-        result.error = f"Test command exited {return_code}; see tests.log and junit.xml."
+        result.error = (
+            f"Test command exited {return_code}; see tests.log and junit.xml."
+        )
     write_result(result, output)
     return int(return_code != 0)
+
+
+def find_bash() -> str:
+    if sys.platform == "win32":
+        # A bare bash.exe can resolve to the System32 WSL launcher before PATH.
+        if git := shutil.which("git"):
+            bash = Path(git).parent.parent / "bin" / "bash.exe"
+            if bash.is_file():
+                return str(bash)
+        raise FileNotFoundError("Git for Windows Bash was not found.")
+    if bash_path := shutil.which("bash"):
+        return bash_path
+    raise FileNotFoundError("Bash was not found on PATH.")
 
 
 def execute_tests(output: Path) -> int:
@@ -205,9 +223,10 @@ def execute_tests(output: Path) -> int:
         print(result.error, file=sys.stderr)
         return 1
     write_result(result, output)
+    bash = find_bash()
     return subprocess.call(
         [
-            "bash",
+            bash,
             "scripts/test-cov.sh",
             f"--junitxml={(output / 'junit.xml').as_posix()}",
             f"--cov-report=json:{(output / 'coverage.json').as_posix()}",
@@ -217,6 +236,7 @@ def execute_tests(output: Path) -> int:
         ],
         env={
             **os.environ,
+            "PATH": str(Path(bash).parent) + os.pathsep + os.environ["PATH"],
             "CONTEXT": f"{result.platform}-py{result.python_version}",
             "COVERAGE_FILE": str(output / ".coverage"),
             # Match xdist's psutil-based auto selection, and record the exact value.
@@ -236,7 +256,9 @@ def read_junit(result: Result, path: Path) -> None:
         key: sum(int(suite.attrib[key]) for suite in suites)
         for key in ("tests", "failures", "errors", "skipped")
     }
-    passed = counts["tests"] - sum(counts[key] for key in ("failures", "errors", "skipped"))
+    passed = counts["tests"] - sum(
+        counts[key] for key in ("failures", "errors", "skipped")
+    )
     if counts["tests"] <= 0 or min(*counts.values(), passed) < 0:
         raise ValueError("JUnit has empty or inconsistent test counts.")
     result.tests = counts["tests"]
@@ -332,9 +354,16 @@ def cell(value: str | int | float | None) -> str:
 
 
 def aggregate(
-    source: Path, output: Path, commit: str, run_id: str, attempt: str, matrix_result: str
+    source: Path,
+    output: Path,
+    commit: str,
+    run_id: str,
+    attempt: str,
+    matrix_result: str,
 ) -> int:
-    results = [collect_result(source, name, commit, run_id, attempt) for name in PLATFORMS]
+    results = [
+        collect_result(source, name, commit, run_id, attempt) for name in PLATFORMS
+    ]
     success = matrix_result == "success" and all(r.status == "passed" for r in results)
     lines = [
         "# Platform CI reference report",
@@ -410,7 +439,8 @@ def aggregate(
         writer.writerows(rows)
     (output / "report.json").write_text(
         json.dumps(
-            {"success": success, "matrix_result": matrix_result, "results": rows}, indent=2
+            {"success": success, "matrix_result": matrix_result, "results": rows},
+            indent=2,
         )
         + "\n",
         encoding="utf-8",
@@ -423,7 +453,9 @@ def aggregate(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run and report reference platform CI.")
+    parser = argparse.ArgumentParser(
+        description="Run and report reference platform CI."
+    )
     parser.add_argument("command", choices=("run", "test", "report"))
     parser.add_argument("--input", type=Path, default=Path("platform-artifacts"))
     parser.add_argument("--output", type=Path, default=Path("platform-report"))
