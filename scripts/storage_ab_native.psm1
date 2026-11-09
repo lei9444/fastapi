@@ -205,7 +205,20 @@ function Get-AbNativeProtection {
         $mode = Get-AbNativeProperty $status 'PerformanceModeStatus'
         if ($mode -is [Enum]) { $mode = [int]$mode }
         if ($realtime -isnot [bool] -or -not (Test-AbInteger $mode) -or $mode -notin @(0, 1)) {
-            return @{ available = $false; realtime_protection_enabled = $null; performance_mode_status = $null; performance_mode = 'Unknown'; error = 'Required protection properties are unavailable.' }
+            $modeValue = if ($null -ne $mode) { Get-AbNativeProperty $mode 'value__' } else { $null }
+            return @{
+                available = $false
+                realtime_protection_enabled = $(if ($realtime -is [bool]) { $realtime } else { $null })
+                performance_mode_status = $null
+                performance_mode = 'Unknown'
+                error = 'Required protection properties are unavailable.'
+                observed = @{
+                    realtime_type = $(if ($null -ne $realtime) { $realtime.GetType().FullName } else { $null })
+                    mode_type = $(if ($null -ne $mode) { $mode.GetType().FullName } else { $null })
+                    mode_text = $(if ($null -ne $mode) { [string]$mode } else { $null })
+                    mode_value_field = $(if (Test-AbInteger $modeValue) { $modeValue } else { $null })
+                }
+            }
         }
         return @{
             available = $true
