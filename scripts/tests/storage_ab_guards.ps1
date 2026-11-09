@@ -62,6 +62,11 @@ foreach ($path in @($corePath, $nativePath, $entryPath)) {
     }
 }
 
+$workflow = Get-Content -LiteralPath (Join-Path $scripts '..\.github\workflows\storage-ab.yml') -Raw
+$storageStep = [regex]::Match($workflow,
+    '(?ms)^      - name: Apply guarded experimental storage layout\r?\n.*?(?=^      -|\z)').Value
+Assert-AbTest ($storageStep.Contains('working-directory: ${{ runner.temp }}')) 'Start the storage shell outside the checkout so inherited directory handles cannot lock its rename.'
+
 # Only the pure core is imported. Native adapters above are parsed, never run.
 Import-Module $corePath -Force
 
@@ -232,7 +237,7 @@ foreach ($change in @(
     $tests++
 }
 
-foreach ($case in @('zero', 'multiple', 'partition-inventory', 'recheck', 'letter', 'reparse', 'venv', 'python')) {
+foreach ($case in @('zero', 'multiple', 'partition-inventory', 'recheck', 'letter', 'reparse', 'unsafe-workspace', 'venv', 'python')) {
     $fake = New-AbFake
     switch ($case) {
         'zero' { $fake.state.inventory.disks = @($fake.state.inventory.disks[0]) }
@@ -245,6 +250,7 @@ foreach ($case in @('zero', 'multiple', 'partition-inventory', 'recheck', 'lette
         'recheck' { $fake.state.change_on_recheck = $true }
         'letter' { $fake.state.drive_letter = 'C' }
         'reparse' { $fake.state.workspace.is_reparse = $true }
+        'unsafe-workspace' { $fake.state.workspace.safe = $false }
         'venv' { $fake.state.workspace.has_venv = $true }
         'python' { $fake.state.python.platform = 'win-amd64' }
     }

@@ -35,7 +35,9 @@ Drive status with Python's Windows `os.path.isdevdrive`, not inferred from its n
 
 The workspace must be an ordinary checkout directory, not a reparse point or a
 protected runner/toolcache/temp ancestor, and must not contain a preexisting
-workload venv. The populated checkout is copied first with hidden/read-only
+workload venv. The storage shell starts in the unchanged `RUNNER_TEMP`, outside
+the checkout, so its inherited working-directory handles do not block renaming.
+The populated checkout is copied first with hidden/read-only
 entries, empty directories, symbolic links and junctions preserved. Unsupported
 reparse/hardlink topologies fail rather than being silently flattened. Source and
 destination manifests verify content hashes, attributes, links, counts and bytes,

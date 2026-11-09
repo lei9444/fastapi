@@ -92,6 +92,7 @@ jobs:
       - name: Apply guarded experimental storage layout
         id: storage
         if: ${{ success() && runner.os == 'Windows' && runner.arch == 'ARM64' && runner.environment == 'github-hosted' }}
+        working-directory: ${{ runner.temp }}
         shell: pwsh
         env:
           STORAGE_RUNNER_OS: ${{ runner.os }}
@@ -101,7 +102,8 @@ jobs:
           STORAGE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           $report = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
-          ./scripts/storage_ab.ps1 -Layout $env:STORAGE_LAYOUT -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $report
+          $entry = Join-Path $env:STORAGE_EXPECTED_WORKSPACE 'scripts\storage_ab.ps1'
+          & $entry -Layout $env:STORAGE_LAYOUT -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $report
       - name: Prepare dependencies and backend wheelhouse once
         if: ${{ success() && steps.storage.outputs.comparable == 'true' }}
         working-directory: ${{ steps.storage.outputs.workspace_physical }}

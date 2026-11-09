@@ -131,6 +131,12 @@ function Get-AbNativeWorkspace {
         return @{ is_directory = [bool]$item.PSIsContainer; is_reparse = $reparse; safe = $false; has_venv = $false }
     }
     $path = Get-AbNativePath $item.FullName
+    if ($Layout -eq 'refs-devdrive') {
+        $processDirectory = Get-AbNativePath ([Environment]::CurrentDirectory)
+        if (Test-AbNativeAncestor $path.physical $processDirectory.physical) {
+            throw 'AB_GUARD: storage_process_must_start_outside_the_workspace'
+        }
+    }
     if ($path.physical.TrimEnd('\') -ieq [IO.Path]::GetPathRoot($path.physical).TrimEnd('\') -or
         -not (Test-Path -LiteralPath (Join-Path $item.FullName '.git'))) {
         throw 'AB_GUARD: workspace_is_not_a_checkout_directory'
