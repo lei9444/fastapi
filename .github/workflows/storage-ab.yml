@@ -66,22 +66,27 @@ jobs:
         shell: pwsh
         env:
           UV_CACHE_DIR: ${{ runner.temp }}/storage-ab-preflight-cache
-          UV_TOOL_DIR: ${{ runner.temp }}/storage-ab-preflight-tools
-          UV_TOOL_BIN_DIR: ${{ runner.temp }}/storage-ab-preflight-bin
         run: |
-          foreach ($path in @($env:UV_CACHE_DIR, $env:UV_TOOL_DIR, $env:UV_TOOL_BIN_DIR)) {
+          $quality = Join-Path $env:RUNNER_TEMP 'storage-ab-preflight-venv'
+          foreach ($path in @($env:UV_CACHE_DIR, $quality)) {
             if (Test-Path -LiteralPath $path) { throw 'Preflight tool/cache path already exists.' }
           }
           $bundle = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts'
           New-Item -ItemType Directory -Path $bundle -Force | Out-Null
           @{quality_cache_initially_absent = $true; workload_cache_not_prepared = $true} |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $bundle 'preflight.json') -Encoding utf8
+          uv venv --python 3.13.17 $quality
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scripts = Join-Path $quality 'Scripts'
+          $python = Join-Path $scripts 'python.exe'
+          uv pip install --python $python ruff==0.16.8 ty==0.0.78 pytest==9.1.1 psutil==7.2.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $status = 0
-          uv tool run --python 3.13.17 --from ruff==0.16.8 ruff check scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          & (Join-Path $scripts 'ruff.exe') check scripts/storage_ab.py scripts/tests/test_storage_ab.py
           if ($LASTEXITCODE -ne 0) { $status = 1 }
-          uv tool run --python 3.13.17 --from ruff==0.16.8 ruff format --diff scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          & (Join-Path $scripts 'ruff.exe') format --diff scripts/storage_ab.py scripts/tests/test_storage_ab.py
           if ($LASTEXITCODE -ne 0) { $status = 1 }
-          uv run --no-project --isolated --python 3.13.17 --with ty==0.0.78 --with pytest==9.1.1 --with psutil==7.2.2 python -c "import subprocess,sys; raise SystemExit(subprocess.call(['ty','check','--python',sys.executable,'scripts/storage_ab.py','scripts/tests/test_storage_ab.py']))"
+          & (Join-Path $scripts 'ty.exe') check --python $python scripts/storage_ab.py scripts/tests/test_storage_ab.py
           if ($LASTEXITCODE -ne 0) { $status = 1 }
           exit $status
       - name: Apply guarded experimental storage layout

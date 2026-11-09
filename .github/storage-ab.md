@@ -16,7 +16,7 @@ the native adapter on a local or self-hosted machine.** Local validation only
 parses native scripts and imports the effect-free core with fully mocked
 operation callbacks. Missing mock operations throw; there is no native fallback.
 Hosted lint/type checks also finish before any native storage action, using
-separate fresh tool/cache directories outside the checkout. Those checks cannot
+a separate fresh preflight venv and cache outside the checkout. Those checks cannot
 seed the later workload caches; their cost remains in full-job wall time.
 
 The control group never initializes a disk or moves the workspace. A treatment
