@@ -176,9 +176,7 @@ def audit_runtime(output: Path, wheelhouse: Path, loops: int) -> int:
     return 0
 
 
-def prepare(
-    setup: common.Result, loops: int, output: Path, wheelhouse: Path
-) -> int:
+def prepare(setup: common.Result, loops: int, output: Path, wheelhouse: Path) -> int:
     common.record_interpreter(setup)
     write_json(output / "setup.json", asdict(setup))
     try:
@@ -686,9 +684,7 @@ def main(argv: list[str] | None = None) -> int:
         else Path("isolated-results") / os.environ["PLATFORM"]
     )
     try:
-        loops = resolve_loops(
-            os.environ["GITHUB_EVENT_NAME"], os.environ.get("LOOPS")
-        )
+        loops = resolve_loops(os.environ["GITHUB_EVENT_NAME"], os.environ.get("LOOPS"))
     except ValueError as exc:
         write_json(output / "report.json", {"success": False, "error": str(exc)})
         publish_summary(output, f"# Invalid loops input\n\n{common.cell(str(exc))}\n")

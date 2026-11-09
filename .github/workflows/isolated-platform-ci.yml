@@ -79,6 +79,7 @@ jobs:
       - name: Prepare workload environment and offline wheelhouse once
         run: python -m scripts.isolated_platform_ci prepare
       - name: Check reporting helpers before the measured loops
+        shell: bash
         run: |
           status=0
           uv run --no-sync ruff check scripts/isolated_platform_ci.py scripts/tests/test_isolated_platform_ci.py || status=1
