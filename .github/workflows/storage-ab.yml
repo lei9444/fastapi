@@ -8,6 +8,7 @@ on:
       - .github/workflows/storage-ab.yml
       - scripts/storage_ab.py
       - scripts/tests/test_storage_ab.py
+  workflow_dispatch:
 
 permissions:
   contents: read
