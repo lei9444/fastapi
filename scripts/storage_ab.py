@@ -7,12 +7,17 @@ import os
 import platform
 import re
 import shutil
+import struct
 import sys
 import sysconfig
 import time
 import xml.etree.ElementTree as ET
+from base64 import urlsafe_b64encode
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
+from email.parser import Parser
+from importlib import import_module
+from importlib.metadata import distribution
 from pathlib import Path
 from statistics import mean
 
@@ -22,6 +27,9 @@ from scripts import platform_ci as common
 LAYOUTS = ("default", "refs-devdrive")
 TRIALS = (1, 2, 3)
 UV_VERSION = "0.13.5"
+HTTPTOOLS_VERSION = "0.9.0"
+HTTPTOOLS_TAG = "cp313-cp313-win_arm64"
+HTTPTOOLS_EXTENSIONS = ("httptools.parser.parser", "httptools.parser.url_parser")
 
 
 @dataclass
@@ -64,6 +72,9 @@ class Trial:
     performance_mode_status: int | None = None
     performance_mode: str = ""
     uv_hardlink_fallback: bool | None = None
+    httptools_version: str = ""
+    httptools_installation: str = ""
+    httptools_wheel_tag: str = ""
     error: str = ""
 
 
@@ -253,6 +264,100 @@ def validate_applied_storage(storage: dict, expected: dict, postcheck: bool) -> 
         or check["protection"]["performance_mode_status"] not in (0, 1)
     ):
         raise ValueError("Post-preparation protection evidence is incomplete.")
+
+
+def pe_machine(data: bytes) -> int:
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError("The installed httptools extension is not a PE binary.")
+    offset = struct.unpack_from("<I", data, 0x3C)[0]
+    if offset + 6 > len(data) or data[offset : offset + 4] != b"PE\0\0":
+        raise ValueError("The installed httptools extension has an invalid PE header.")
+    return struct.unpack_from("<H", data, offset + 4)[0]
+
+
+def validate_httptools(data: dict, log: str) -> None:
+    if (
+        data["version"] != HTTPTOOLS_VERSION
+        or data["installer"] != "uv"
+        or data["wheel_tags"] != [HTTPTOOLS_TAG]
+        or data["root_is_purelib"] != "false"
+        or data["uv_build_metadata_present"] is not False
+        or data["direct_url_present"] is not False
+        or data["workload_venv"] is not True
+    ):
+        raise ValueError("httptools must be the pinned prebuilt native ARM64 wheel.")
+    extensions = data["extensions"]
+    if (
+        len(extensions) != len(HTTPTOOLS_EXTENSIONS)
+        or {item["module"] for item in extensions} != set(HTTPTOOLS_EXTENSIONS)
+        or any(
+            item["pe_machine"] != 0xAA64
+            or item["record_matches"] is not True
+            or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+            for item in extensions
+        )
+    ):
+        raise ValueError("httptools native extensions or installed RECORD hashes differ.")
+    if re.search(r"(?m)^\s*(?:Building|Built) httptools(?:==|\s|@)", log):
+        raise ValueError("The dependency log shows a source build of httptools.")
+    if not re.search(
+        rf"(?m)^\s*\+\s+httptools=={re.escape(HTTPTOOLS_VERSION)}\s*$", log
+    ):
+        raise ValueError("The cold installation of httptools is missing from its log.")
+
+
+def audit_httptools(output: Path) -> int:
+    dist = distribution("httptools")
+    prefix = Path(sys.prefix).resolve()
+    files = dist.files
+    if files is None:
+        raise ValueError("httptools installed RECORD is unavailable.")
+    recorded = {Path(dist.locate_file(item)).resolve(): item for item in files}
+    extensions = []
+    for name in HTTPTOOLS_EXTENSIONS:
+        module = import_module(name)
+        filename = getattr(module, "__file__", None)
+        if not isinstance(filename, str):
+            raise ValueError(f"{name} has no installed binary path.")
+        path = Path(filename).resolve()
+        if not path.is_relative_to(prefix) or path.suffix.lower() != ".pyd":
+            raise ValueError(f"{name} is not a native workload-venv extension.")
+        binary = path.read_bytes()
+        digest = hashlib.sha256(binary)
+        item = recorded.get(path)
+        expected_hash = item.hash if item is not None else None
+        extensions.append(
+            {
+                "module": name,
+                "path": str(path.relative_to(prefix)),
+                "pe_machine": pe_machine(binary),
+                "sha256": digest.hexdigest(),
+                "record_matches": expected_hash is not None
+                and expected_hash.mode == "sha256"
+                and expected_hash.value
+                == urlsafe_b64encode(digest.digest()).rstrip(b"=").decode("ascii"),
+            }
+        )
+    wheel_text = dist.read_text("WHEEL")
+    installer = dist.read_text("INSTALLER")
+    if wheel_text is None or installer is None:
+        raise ValueError("httptools WHEEL/INSTALLER metadata is unavailable.")
+    wheel = Parser().parsestr(wheel_text)
+    evidence = {
+        "version": dist.version,
+        "installer": installer.strip(),
+        "wheel_tags": wheel.get_all("Tag", []),
+        "root_is_purelib": wheel.get("Root-Is-Purelib"),
+        "wheel_metadata": wheel_text,
+        "uv_build_metadata_present": dist.read_text("uv_build.json") is not None,
+        "direct_url_present": dist.read_text("direct_url.json") is not None,
+        "workload_venv": prefix == Path(".venv").resolve(),
+        "extensions": extensions,
+    }
+    isolated.write_json(output / "httptools.json", evidence)
+    validate_httptools(evidence, (output / "dependencies.log").read_text("utf-8"))
+    print(json.dumps(evidence, indent=2))
+    return 0
 
 
 def prepare_trial(output: Path, wheelhouse: Path, storage_path: Path) -> int:
@@ -496,6 +601,12 @@ def collect_trial(root: Path, trial: Trial, jobs: dict) -> tuple[Trial, dict]:
         trial.setup_seconds = metric(setup.dependency_setup_seconds, "preparation")
         if setup.status != "setup_succeeded" or setup.setup_exit_code != 0:
             raise ValueError(setup.error or "Preparation failed.")
+        dependency_log = (output / "dependencies.log").read_text(encoding="utf-8")
+        httptools = load_json(output / "httptools.json")
+        validate_httptools(httptools, dependency_log)
+        trial.httptools_version = httptools["version"]
+        trial.httptools_installation = "prebuilt-wheel"
+        trial.httptools_wheel_tag = httptools["wheel_tags"][0]
         result = isolated.collect_loop(output / "loop-1", identity_result, 1)
         trial.build_seconds = result.build_seconds
         trial.test_seconds = result.test_seconds
@@ -510,9 +621,7 @@ def collect_trial(root: Path, trial: Trial, jobs: dict) -> tuple[Trial, dict]:
             setattr(trial, name, getattr(result, name))
         if result.status != "passed":
             raise ValueError(result.error or f"Measurement is {result.status}.")
-        trial.uv_hardlink_fallback = "Failed to hardlink" in (
-            output / "dependencies.log"
-        ).read_text(encoding="utf-8")
+        trial.uv_hardlink_fallback = "Failed to hardlink" in dependency_log
     except (OSError, ValueError, KeyError, TypeError) as exc:
         errors.append(str(exc))
     trial.error = "; ".join(errors)
@@ -552,6 +661,7 @@ def build_summary(trials: list[Trial]) -> tuple[list[dict], dict]:
         len({row.uv_lock_sha256 for row in trials}) != 1
         or len({row.wheelhouse_sha256 for row in trials}) != 1
         or len({row.uv_version for row in trials}) != 1
+        or len({row.httptools_version for row in trials}) != 1
     ):
         comparable = False
         for summary in summaries:
@@ -661,6 +771,20 @@ def aggregate(
         lines.append("| " + " | ".join(common.cell(v) for v in values) + " |")
     lines += [
         "",
+        "| Layout | Trial | httptools | Installation | Installed wheel tag |",
+        "|---|---:|---|---|---|",
+    ]
+    for trial in trials:
+        values = (
+            trial.layout,
+            trial.trial,
+            trial.httptools_version,
+            trial.httptools_installation,
+            trial.httptools_wheel_tag,
+        )
+        lines.append("| " + " | ".join(common.cell(v) for v in values) + " |")
+    lines += [
+        "",
         "| Layout | Trial | Inspection | Create volume | Copy/migrate | Configure paths | Postcheck | Workspace filesystem | Performance mode setting |",
         "|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
@@ -685,8 +809,10 @@ def aggregate(
         "tool setup, checks, migration, artifact staging/upload and post steps within that "
         "interval; time before started_at (queueing) is excluded. It is not a sum of payload timers.",
         "",
-        "Preparation/build/test boundaries and the locked httptools 0.7.1 remain unchanged. "
-        "An ARM64 source build of httptools can coexist with storage overhead. The build remains "
+        f"Both groups use locked httptools {HTTPTOOLS_VERSION}. The existing timed preparation "
+        "also audits its installed WHEEL/INSTALLER metadata, uv source-build marker, imported "
+        "ARM64 PE extensions and RECORD hashes against the cold installation log. It does not "
+        "download or prewarm dependencies separately. The build remains "
         "build 1.6.1 / pip 25.0.1 / PDM 2.5.0, using the offline wheelhouse and default "
         "isolated sdist-to-wheel flow. Python is native 3.13.17; uv is pinned to 0.13.5.",
         "",
@@ -701,6 +827,10 @@ def aggregate(
         "benchmark. Different fresh hosted machines and populated-copy filesystem warming can "
         "affect results. Three samples do not establish a universal gain. Normal four-platform "
         "CI storage and loops=3 remain unchanged; enabling ReFS by default requires a later decision.",
+        "Both groups include storage audits and cold-cache configuration added for this experiment. "
+        "Their full-job difference is not a measured production saving for the original CI; "
+        "subtracting these checks cannot establish that unmeasured result. Earlier httptools "
+        "0.7.1 runs are historical references, not a simultaneous version A/B.",
         "",
         f"Download `storage-ab-report-{attempt}` for `report.csv` (group means), `trials.csv` "
         "(all six trials), `comparison.json`, `report.json` and this report. Each trial artifact "
@@ -778,7 +908,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.wheelhouse is None:
         parser.error("--wheelhouse is required")
     if args.command == "audit":
-        return isolated.audit_runtime(args.output, args.wheelhouse, 1)
+        code = isolated.audit_runtime(args.output, args.wheelhouse, 1)
+        return code if code != 0 else audit_httptools(args.output)
     if args.command == "prepare":
         return prepare_trial(args.output, args.wheelhouse, args.storage)
     return isolated.run_loops(isolated.new_setup(), 1, args.output, args.wheelhouse)

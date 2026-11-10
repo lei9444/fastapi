@@ -1,7 +1,11 @@
 import csv
+import hashlib
+import struct
+from base64 import urlsafe_b64encode
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,6 +33,27 @@ def expected(layout: str = "default", trial: int = 1) -> dict:
         "commit": SHA,
         "run_id": "123",
         "run_attempt": "1",
+    }
+
+
+def httptools_record() -> dict:
+    return {
+        "version": ab.HTTPTOOLS_VERSION,
+        "installer": "uv",
+        "wheel_tags": [ab.HTTPTOOLS_TAG],
+        "root_is_purelib": "false",
+        "uv_build_metadata_present": False,
+        "direct_url_present": False,
+        "workload_venv": True,
+        "extensions": [
+            {
+                "module": name,
+                "pe_machine": 0xAA64,
+                "sha256": "c" * 64,
+                "record_matches": True,
+            }
+            for name in ab.HTTPTOOLS_EXTENSIONS
+        ],
     }
 
 
@@ -163,6 +188,7 @@ def write_trial(root: Path, layout: str, number: int) -> Path:
         measurement / "inputs.json", {**common_data, "uv_lock_sha256": "b" * 64}
     )
     ab.isolated.write_json(measurement / "audit.json", sample_audit(1))
+    ab.isolated.write_json(measurement / "httptools.json", httptools_record())
     result = sample_result("windows-arm64", 1)
     result.commit = SHA
     result.build_seconds = 7.0
@@ -171,7 +197,8 @@ def write_trial(root: Path, layout: str, number: int) -> Path:
     write_build(measurement / "loop-1")
     write_test_evidence(measurement / "loop-1")
     (measurement / "dependencies.log").write_text(
-        "Installed locked packages.\n", encoding="utf-8"
+        f"Installed locked packages.\n + httptools=={ab.HTTPTOOLS_VERSION}\n",
+        encoding="utf-8",
     )
     return folder
 
@@ -278,6 +305,103 @@ def test_local_measurement_entry_is_rejected(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.parametrize(
     "problem",
+    [
+        "version",
+        "tag",
+        "source_metadata",
+        "source_log",
+        "missing_log",
+        "outside_venv",
+        "wrong_machine",
+        "record_mismatch",
+        "missing_extension",
+    ],
+)
+def test_unverified_httptools_installation_is_rejected(problem: str):
+    evidence = httptools_record()
+    log = f" + httptools=={ab.HTTPTOOLS_VERSION}\n"
+    if problem == "version":
+        evidence["version"] = "0.7.1"
+    elif problem == "tag":
+        evidence["wheel_tags"] = ["cp313-cp313-win_amd64"]
+    elif problem == "source_metadata":
+        evidence["uv_build_metadata_present"] = True
+    elif problem == "source_log":
+        log += f"   Building httptools=={ab.HTTPTOOLS_VERSION}\n"
+    elif problem == "missing_log":
+        log = "Nothing was installed.\n"
+    elif problem == "outside_venv":
+        evidence["workload_venv"] = False
+    elif problem == "wrong_machine":
+        evidence["extensions"][0]["pe_machine"] = 0x8664
+    elif problem == "record_mismatch":
+        evidence["extensions"][0]["record_matches"] = False
+    else:
+        evidence["extensions"].pop()
+    with pytest.raises(ValueError):
+        ab.validate_httptools(evidence, log)
+
+
+def test_installed_native_wheel_audit_does_not_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+    prefix = tmp_path / ".venv"
+    prefix.mkdir()
+    monkeypatch.setattr(ab.sys, "prefix", str(prefix))
+    binary = bytearray(256)
+    binary[:2] = b"MZ"
+    struct.pack_into("<I", binary, 0x3C, 128)
+    binary[128:132] = b"PE\0\0"
+    struct.pack_into("<H", binary, 132, 0xAA64)
+    digest = hashlib.sha256(binary)
+    files = []
+    modules = {}
+    for name in ab.HTTPTOOLS_EXTENSIONS:
+        filename = prefix / (name + ".pyd")
+        filename.write_bytes(binary)
+        files.append(
+            SimpleNamespace(
+                path=filename,
+                hash=SimpleNamespace(
+                    mode="sha256",
+                    value=urlsafe_b64encode(digest.digest()).rstrip(b"=").decode(),
+                ),
+            )
+        )
+        modules[name] = SimpleNamespace(__file__=str(filename))
+    metadata = {
+        "WHEEL": f"Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: {ab.HTTPTOOLS_TAG}\n",
+        "INSTALLER": "uv\n",
+    }
+    dist = SimpleNamespace(
+        version=ab.HTTPTOOLS_VERSION,
+        files=files,
+        locate_file=lambda item: item.path,
+        read_text=metadata.get,
+    )
+    monkeypatch.setattr(ab, "distribution", lambda name: dist)
+    monkeypatch.setattr(ab, "import_module", modules.__getitem__)
+    output = tmp_path / "measurement"
+    output.mkdir()
+    (output / "dependencies.log").write_text(
+        f" + httptools=={ab.HTTPTOOLS_VERSION}\n", encoding="utf-8"
+    )
+    assert ab.audit_httptools(output) == 0
+    evidence = ab.load_json(output / "httptools.json")
+    assert evidence["version"] == ab.HTTPTOOLS_VERSION
+    assert all(item["record_matches"] for item in evidence["extensions"])
+    assert evidence["uv_build_metadata_present"] is False
+
+
+@pytest.mark.parametrize("data", [b"", b"MZ" + b"\0" * 62, b"not a PE file"])
+def test_invalid_pe_header_is_rejected(data: bytes):
+    with pytest.raises(ValueError, match="PE"):
+        ab.pe_machine(data)
+
+
+@pytest.mark.parametrize(
+    "problem",
     ["missing", "duplicate", "wrong_sha", "wrong_attempt", "no_end", "negative"],
 )
 def test_job_wall_metadata_must_be_real_and_match(problem: str):
@@ -313,6 +437,11 @@ def test_full_job_delta_includes_migration_not_just_faster_preparation(tmp_path:
     assert comparison["job_wall_seconds_delta"] == 20.0
     assert comparison["job_wall_seconds_reduction_percent"] < 0
     assert report["summaries"][1]["mean_storage_total_seconds"] == 30.0
+    assert all(
+        row["httptools_version"] == ab.HTTPTOOLS_VERSION
+        and row["httptools_installation"] == "prebuilt-wheel"
+        for row in report["trials"]
+    )
     with (output / "trials.csv").open(newline="", encoding="utf-8") as stream:
         assert len(list(csv.DictReader(stream))) == 6
 
@@ -359,6 +488,23 @@ def test_wheelhouse_mismatch_is_not_comparable(tmp_path: Path):
     summaries, comparison = ab.build_summary(rows)
     assert comparison["comparable"] is False
     assert all(row["mean_job_wall_seconds"] is None for row in summaries)
+
+
+def test_missing_installed_wheel_evidence_blocks_group_mean(tmp_path: Path):
+    rows = []
+    for layout in ab.LAYOUTS:
+        for number in ab.TRIALS:
+            folder = write_trial(tmp_path, layout, number)
+            if (layout, number) == ("refs-devdrive", 2):
+                (folder / "measurement" / "httptools.json").unlink()
+            row, _ = ab.collect_trial(
+                tmp_path, ab.Trial(layout, number, SHA, "123", "1"), jobs()
+            )
+            rows.append(row)
+    summaries, comparison = ab.build_summary(rows)
+    assert summaries[0]["mean_setup_seconds"] == 20.0
+    assert summaries[1]["mean_setup_seconds"] is None
+    assert comparison["comparable"] is False
 
 
 def test_unapplied_refs_keeps_storage_cost_and_never_uses_control_fallback(
