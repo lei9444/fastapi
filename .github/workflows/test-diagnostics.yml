@@ -1,0 +1,61 @@
+name: Windows Linux test diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UV_NO_SYNC: true
+  UV_PYTHON_DOWNLOADS: never
+  UV_PYTHON: "3.13.17"
+  INLINE_SNAPSHOT_DEFAULT_FLAGS: review
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  diagnostic:
+    name: Test diagnostic (${{ matrix.platform }})
+    timeout-minutes: 30
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-2025
+          - platform: linux-x64
+            runner: ubuntu-24.04
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      RUNNER_LABEL: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          architecture: x64
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+          enable-cache: false
+      - name: Prepare the unchanged workload environment
+        run: python scripts/diagnostics/run_diagnostic.py prepare
+      - name: Validate synthetic instrumentation before measurement
+        run: uv run --no-sync python scripts/diagnostics/verify_synthetic.py
+      - name: One complete test invocation with buffered diagnostics
+        run: uv run --no-sync python scripts/diagnostics/run_diagnostic.py run
+      - name: Verify traces and publish this job's timing boundaries
+        if: ${{ !cancelled() }}
+        run: python scripts/diagnostics/analyze_diagnostic.py diagnostic-results
+      - name: Preserve all diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-diagnostic-${{ matrix.platform }}-${{ github.run_attempt }}
+          path: diagnostic-results
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7

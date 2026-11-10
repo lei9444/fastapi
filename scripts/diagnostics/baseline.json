@@ -1,0 +1,12 @@
+{
+  "windows-x64": {
+    "baseline_run": "42752473021",
+    "baseline_commit": "4d047839db5185c24aa16e116c619edbfba6cf3a",
+    "manifest_sha256": "2ba76d4021b21c58be096dfead7bd53dd06d2b5af836572b931eb056e231bf67"
+  },
+  "linux-x64": {
+    "baseline_run": "42752473021",
+    "baseline_commit": "4d047839db5185c24aa16e116c619edbfba6cf3a",
+    "manifest_sha256": "9c5dc64d70dffafafe8309515cd4f061bb3fba3cb4dbc16f9d28b8b147c5cdb6"
+  }
+}
