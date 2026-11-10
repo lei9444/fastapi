@@ -62,9 +62,11 @@ The backend wheel and its dependencies are downloaded before the loop timer.
 During builds, `PIP_NO_INDEX=1` and `PIP_FIND_LINKS` select only that local
 wheelhouse. The binary-only download constraint applies **only to this backend
 wheelhouse**, not to `uv sync` and the application's locked test dependencies.
-For example, the locked httptools 0.7.1 can still be source-built during Windows
-ARM64 preparation; that is separate from each loop's FastAPI distribution build.
-The lock file is not upgraded.
+For example, historical runs with httptools 0.7.1 source-built it during Windows
+ARM64 preparation; that was separate from each loop's FastAPI distribution build.
+The approved lock update to httptools 0.9.0 provides a CPython 3.13 Windows ARM64
+wheel. The preparation/build boundaries remain the same; earlier reports retain
+their original versions and values.
 
 The evidence must show two `venv+pip` creations, the pinned backend installed in
 both environments, `Building wheel from sdist`, and nonempty wheel/sdist outputs.

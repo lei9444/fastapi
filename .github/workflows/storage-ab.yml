@@ -1,4 +1,4 @@
-name: Prepare targeted httptools upgrade
+name: Windows ARM64 guarded storage A/B
 
 on:
   push:
@@ -6,93 +6,188 @@ on:
       - lei9444-fastapi-platform-ci
     paths:
       - .github/workflows/storage-ab.yml
+      - .github/storage-ab.md
       - scripts/storage_ab.py
+      - scripts/storage_ab.ps1
+      - scripts/storage_ab_core.psm1
+      - scripts/storage_ab_native.psm1
+      - scripts/tests/storage_ab_guards.ps1
       - scripts/tests/test_storage_ab.py
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
+  UV_NO_SYNC: true
   UV_PYTHON_DOWNLOADS: never
+  UV_PYTHON: "3.13.17"
+  INLINE_SNAPSHOT_DEFAULT_FLAGS: review
+  PYTHONUNBUFFERED: "1"
+  PLATFORM: windows-arm64
+  RUNNER_LABEL: windows-11-arm
+  EXPECTED_ARCHITECTURE: arm64
 
 jobs:
-  prepare:
-    name: Generate the lock and check helpers without storage operations
+  trial:
+    name: Storage A/B (${{ matrix.layout }}, trial ${{ matrix.trial }})
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: [default, refs-devdrive]
+        trial: [1, 2, 3]
+    env:
+      STORAGE_LAYOUT: ${{ matrix.layout }}
+      STORAGE_TRIAL: ${{ matrix.trial }}
+    steps:
+      - name: Reject unsupported runner context
+        if: ${{ !(runner.os == 'Windows' && runner.arch == 'ARM64' && runner.environment == 'github-hosted') }}
+        shell: pwsh
+        run: throw 'This experiment requires a GitHub-hosted Windows ARM64 runner.'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          architecture: arm64
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+          enable-cache: false
+      - name: Parse native scripts and run fully mocked guard tests
+        shell: pwsh
+        run: ./scripts/tests/storage_ab_guards.ps1
+      - name: Check experimental code before native storage operations
+        shell: pwsh
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/storage-ab-preflight-cache
+        run: |
+          $quality = Join-Path $env:RUNNER_TEMP 'storage-ab-preflight-venv'
+          foreach ($path in @($env:UV_CACHE_DIR, $quality)) {
+            if (Test-Path -LiteralPath $path) { throw 'Preflight tool/cache path already exists.' }
+          }
+          $bundle = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts'
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          @{quality_cache_initially_absent = $true; workload_cache_not_prepared = $true} |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $bundle 'preflight.json') -Encoding utf8
+          uv venv --python 3.13.17 $quality
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scripts = Join-Path $quality 'Scripts'
+          $python = Join-Path $scripts 'python.exe'
+          uv pip install --python $python ruff==0.16.8 ty==0.0.78 pytest==9.1.1 psutil==7.2.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $status = 0
+          & (Join-Path $scripts 'ruff.exe') check scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          if ($LASTEXITCODE -ne 0) { $status = 1 }
+          & (Join-Path $scripts 'ruff.exe') format --diff scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          if ($LASTEXITCODE -ne 0) { $status = 1 }
+          & (Join-Path $scripts 'ty.exe') check --python $python scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          if ($LASTEXITCODE -ne 0) { $status = 1 }
+          exit $status
+      - name: Apply guarded experimental storage layout
+        id: storage
+        if: ${{ success() && runner.os == 'Windows' && runner.arch == 'ARM64' && runner.environment == 'github-hosted' }}
+        working-directory: ${{ runner.temp }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_OS: ${{ runner.os }}
+          STORAGE_RUNNER_ARCH: ${{ runner.arch }}
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STORAGE_EXPECTED_WORKSPACE: ${{ github.workspace }}
+          STORAGE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          $entry = Join-Path $env:STORAGE_EXPECTED_WORKSPACE 'scripts\storage_ab.ps1'
+          & $entry -Layout $env:STORAGE_LAYOUT -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $report
+      - name: Prepare dependencies and backend wheelhouse once
+        if: ${{ success() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        env:
+          STORAGE_WHEELHOUSE: ${{ steps.storage.outputs.wheelhouse }}
+        run: |
+          $storage = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          python -m scripts.storage_ab prepare --storage $storage --wheelhouse $env:STORAGE_WHEELHOUSE
+      - name: Verify actual venv, cache, temp, uv and protection state
+        if: ${{ success() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_OS: ${{ runner.os }}
+          STORAGE_RUNNER_ARCH: ${{ runner.arch }}
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STORAGE_EXPECTED_WORKSPACE: ${{ github.workspace }}
+          STORAGE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $storage = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          ./scripts/storage_ab.ps1 -Phase inspect -Layout $env:STORAGE_LAYOUT -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $storage
+      - name: Run one isolated build and complete test suite
+        if: ${{ success() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        env:
+          STORAGE_WHEELHOUSE: ${{ steps.storage.outputs.wheelhouse }}
+        run: |
+          $storage = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          python -m scripts.storage_ab run --storage $storage --wheelhouse $env:STORAGE_WHEELHOUSE
+      - name: Stage workload evidence without caches or backups
+        if: ${{ always() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts'
+          python -m scripts.storage_ab finalize --storage (Join-Path $bundle 'storage.json') --bundle $bundle
+      - name: Upload all trial evidence, including unapplied layouts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: storage-ab-${{ matrix.layout }}-${{ matrix.trial }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-ab-artifacts
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    name: Aggregate storage A/B and full job timings
+    if: always()
+    needs: trial
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13.17"
+          python-version: ${{ env.UV_PYTHON }}
           architecture: x64
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          version: "0.13.5"
-          enable-cache: false
-      - name: Generate and verify the single-package lock update
-        shell: bash
+          pattern: storage-ab-*-${{ github.run_attempt }}
+          path: storage-ab-artifacts
+      - name: Read current-attempt workload job start/end metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir upgrade-evidence
-          cp uv.lock upgrade-evidence/before.lock
-          uv --version | tee upgrade-evidence/uv-version.txt
-          python --version | tee upgrade-evidence/python-version.txt
-          uv lock --upgrade-package httptools==0.9.0 --python 3.13.17 2>&1 | tee upgrade-evidence/lock.log
-          cp uv.lock upgrade-evidence/uv.lock
-          uv lock --check --python 3.13.17
-          python - <<'PY'
-          import hashlib
-          import json
-          import tomllib
-          from pathlib import Path
-          root = Path("upgrade-evidence")
-          before = tomllib.loads((root / "before.lock").read_text())
-          after = tomllib.loads((root / "uv.lock").read_text())
-          old_packages = before.pop("package")
-          new_packages = after.pop("package")
-          assert before == after, "Unexpected lock metadata drift"
-          assert [p for p in old_packages if p["name"] != "httptools"] == [
-              p for p in new_packages if p["name"] != "httptools"
-          ], "Unexpected changes to other packages"
-          old = [p for p in old_packages if p["name"] == "httptools"]
-          new = [p for p in new_packages if p["name"] == "httptools"]
-          assert len(old) == len(new) == 1
-          assert old[0]["version"] == "0.7.1" and new[0]["version"] == "0.9.0"
-          assert new[0]["source"] == old[0]["source"] == {"registry": "https://pypi.org/simple"}
-          wheel = [w for w in new[0]["wheels"] if w["url"].endswith("httptools-0.9.0-cp313-cp313-win_arm64.whl")]
-          assert len(wheel) == 1
-          assert wheel[0]["hash"] == "sha256:bfdabac0c6d3d6a5be8c2a100a001c92c14a39bbafd5999545a675c493626e64"
-          receipt = {
-              "command": "uv lock --upgrade-package httptools==0.9.0 --python 3.13.17",
-              "uv": (root / "uv-version.txt").read_text().strip(),
-              "python": (root / "python-version.txt").read_text().strip(),
-              "changed_packages": {"httptools": ["0.7.1", "0.9.0"]},
-              "other_packages_unchanged": len(new_packages) - 1,
-              "before_sha256": hashlib.sha256((root / "before.lock").read_bytes()).hexdigest(),
-              "after_sha256": hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest(),
-              "windows_arm64_wheel": wheel[0],
-          }
-          (root / "lock-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-          print(json.dumps(receipt, indent=2))
-          PY
-      - name: Format and check upgrade evidence helpers
-        shell: bash
-        run: |
-          quality="$RUNNER_TEMP/httptools-upgrade-quality"
-          uv venv --python 3.13.17 "$quality"
-          uv pip install --python "$quality/bin/python" ruff==0.16.8 ty==0.0.78 pytest==9.1.1 psutil==7.2.2
-          "$quality/bin/ruff" check --fix scripts/storage_ab.py scripts/tests/test_storage_ab.py
-          "$quality/bin/ruff" format scripts/storage_ab.py scripts/tests/test_storage_ab.py
-          git diff --binary -- scripts/storage_ab.py scripts/tests/test_storage_ab.py > upgrade-evidence/format.patch
-          "$quality/bin/ty" check --python "$quality/bin/python" scripts/storage_ab.py scripts/tests/test_storage_ab.py
-          "$quality/bin/python" -m pytest -c /dev/null --rootdir . --strict-config --strict-markers -W error -p no:cacheprovider scripts/tests/test_storage_ab.py scripts/tests/test_isolated_platform_ci.py scripts/tests/test_platform_ci.py -q
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '{total_count,jobs:[.jobs[]|{id,run_id,run_attempt,name,status,conclusion,started_at,completed_at,head_sha}]}' \
+            > storage-ab-jobs.json
+      - name: Publish strict A/B means and net job comparison
+        if: always()
+        env:
+          MATRIX_RESULT: ${{ needs.trial.result }}
+        run: python -m scripts.storage_ab report --output storage-ab-report
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: httptools-upgrade-inputs
-          path: upgrade-evidence
+          name: storage-ab-report-${{ github.run_attempt }}
+          path: |
+            storage-ab-report
+            storage-ab-jobs.json
           if-no-files-found: error
           retention-days: 7

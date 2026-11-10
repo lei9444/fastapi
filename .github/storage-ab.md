@@ -73,9 +73,24 @@ them, which is part of this workflow-level intervention.
 
 Versions remain native Python **3.13.17**, native uv **0.13.5**, build **1.6.1**,
 pip **25.0.1**, and pdm-backend **2.5.0**, with the same commit and `uv.lock`.
-The locked httptools **0.7.1** is not upgraded. `uv sync` still permits its
-Windows ARM64 source build; binary-only preparation applies only to the backend
-wheelhouse. Such compilation and storage costs can coexist.
+The approved dependency follow-up locks httptools **0.9.0**, which publishes a
+`cp313-cp313-win_arm64` wheel. Both layouts use that same lock. `uv sync` still
+allows source builds in general; binary-only preparation applies only to the
+backend wheelhouse, not all application dependencies.
+
+The existing timed preparation audit now also records `httptools.json`: installed
+version, WHEEL tag, INSTALLER, uv's source-build marker, and the imported parser
+extensions' ARM64 PE headers and hashes checked against installed RECORD entries.
+A missing install log, an unexpected version/architecture, or evidence of a source
+build fails the trial. This reads the completed cold installation; it neither
+downloads dependencies separately nor prewarms the workload cache. The original
+wheel URL and expected archive SHA256 remain in `uv.lock`; installed extension
+hashes are not presented as the wheel archive's checksum.
+
+[The earlier 0.7.1 run](https://github.com/lei9444/fastapi/actions/runs/42653764340)
+remains an unchanged historical reference. Comparing it with the 0.9.0 batch is
+not a simultaneous version A/B: hosted variability and the added installation
+audit can affect timings. Do not relabel old source-build measurements as 0.9.0.
 
 The existing isolated build/test logic is reused with `loops=1`. Build uses the
 native workload Python's default `python -m build --outdir ...`, offline backend
@@ -99,6 +114,11 @@ GitHub job wall time is independently read as **completed_at minus started_at**
 for each workload job. It includes provisioning/checkout/setup/checks, migration,
 artifact staging/upload and post steps within that interval; queue time before
 started_at is excluded. It is not reconstructed by adding payload timers.
+Both groups include storage audits and cold-cache configuration added for this
+experiment, plus separate preflight tool checks. The measured full-job difference
+is therefore between these two experimental jobs, not an established production
+saving for the original four-platform CI. Subtracting inspection costs cannot
+establish that unmeasured production result.
 
 All six samples and failures remain visible. Missing/unapplied/failed ReFS trials
 are not counted as default-layout successes or usable ReFS measurements. Group
@@ -111,7 +131,8 @@ The report is in the Actions Summary and `storage-ab-report-<attempt>`:
 `report.csv` contains group means, `trials.csv` all six rows, and JSON retains
 comparison and full storage metadata. Each `storage-ab-<layout>-<trial>-<attempt>`
 artifact retains storage evidence plus setup/build/test logs, wheel/sdist, JUnit
-and coverage. All artifacts expire after seven days.
+and coverage, including the installed httptools evidence. All artifacts expire
+after seven days.
 
 Push triggers are limited to this experiment's exact files on the current
 feature branch. Manual dispatch is declared for later use once the workflow

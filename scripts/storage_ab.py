@@ -297,7 +297,9 @@ def validate_httptools(data: dict, log: str) -> None:
             for item in extensions
         )
     ):
-        raise ValueError("httptools native extensions or installed RECORD hashes differ.")
+        raise ValueError(
+            "httptools native extensions or installed RECORD hashes differ."
+        )
     if re.search(r"(?m)^\s*(?:Building|Built) httptools(?:==|\s|@)", log):
         raise ValueError("The dependency log shows a source build of httptools.")
     if not re.search(
@@ -312,7 +314,12 @@ def audit_httptools(output: Path) -> int:
     files = dist.files
     if files is None:
         raise ValueError("httptools installed RECORD is unavailable.")
-    recorded = {Path(dist.locate_file(item)).resolve(): item for item in files}
+    recorded = {}
+    for item in files:
+        location = dist.locate_file(item)
+        if not isinstance(location, Path):
+            raise ValueError("httptools RECORD must describe local installed files.")
+        recorded[location.resolve()] = item
     extensions = []
     for name in HTTPTOOLS_EXTENSIONS:
         module = import_module(name)
