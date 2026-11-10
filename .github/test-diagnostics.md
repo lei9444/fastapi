@@ -75,6 +75,9 @@ test and child times are retained but must not be added as independent tools.
 Child exit residual includes SDK/interpreter shutdown, recorded coverage,
 diagnostic output, pipe handling and process teardown; unmatched time is not
 silently assigned to a specific cause.
+In pytest-cov 7.1.0, `Coverage.report` runs once to obtain the total and again
+for the requested terminal report. Their combined time is not terminal printing
+alone; XML and JSON reports are separate calls. No report or gate is removed.
 
 Missing/incomplete traces, mismatched worker count, missing correlated children,
 changed JUnit outcomes, and inconsistent monotonic boundaries are errors even

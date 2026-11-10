@@ -225,7 +225,7 @@ def summarize(traces, invocation, platform):
         "controller_combine_seconds": union(span_kind(controller, "coverage.combine")),
         "controller_xml_report_seconds": union(span_kind(controller, "coverage.xml_report")),
         "controller_json_report_seconds": union(span_kind(controller, "coverage.json_report")),
-        "controller_terminal_report_seconds": union(span_kind(controller, "coverage.report")),
+        "controller_report_calls_seconds": union(span_kind(controller, "coverage.report")),
     }
     active = union(protocols, first_item, last_item)
     critical["item_window_at_least_one_worker_active_seconds"] = active
