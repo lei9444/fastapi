@@ -32,9 +32,11 @@ not OS process creation or the first Python instruction. It installs:
 - Timing wrappers around actual pytest-cov controller finish/summary methods and
   coverage start/stop/save/combine/report/exit methods, including the actual
   tracer class selected at start. Buffered console report timestamps are not
-  used as substitutes.
+  used as substitutes. Controller methods are attached after pytest registers
+  its real plugin, since assertion rewriting can bypass normal import finders.
 - Timing wrappers around the unchanged pytest-timeout set/cancel hooks. The
   Windows cancel hook includes its real timer cancel/join; Linux retains signals.
+  These are registered pluggy wrappers, not replacements of the timeout plugin.
 - A narrowly matched wrapper of the existing telemetry `subprocess.run` call.
   The original command, environment filtering, `PYDANTIC_DISABLE_PLUGINS`,
   capture settings, 15-second child timeout, return value and exceptions remain
@@ -78,6 +80,14 @@ Missing/incomplete traces, mismatched worker count, missing correlated children,
 changed JUnit outcomes, and inconsistent monotonic boundaries are errors even
 when pytest succeeds. Preserve failed artifacts. A failed measurement does not
 authorize another run or a larger matrix.
+
+The initial diagnostic run `42840865672` passed both complete test manifests but
+failed trace verification: assertion-rewritten plugin imports bypassed the first
+import-based timeout/controller wrappers. Its underlying coverage method,
+worker/item and child traces remain evidence, but missing hooks are not zero
+cost and that run is not a complete successful diagnostic. The corrected
+registration above is covered by synthetic tests; another hosted measurement
+requires explicit approval rather than an automatic rerun.
 
 `scripts/diagnostics/verify_synthetic.py` uses only mocks and synthetic timelines.
 It lives outside `tests` and `scripts/tests` and is not added to the measured

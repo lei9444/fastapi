@@ -242,6 +242,50 @@ class SyntheticChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "item_teardown"):
             analysis.summarize(traces, invocation, "windows-x64")
 
+    def test_timeout_wrappers_use_registered_hooks_not_import_loaders(self):
+        import pluggy
+        import pytest
+
+        import diag_plugin
+
+        class Specification:
+            @pytest.hookspec(firstresult=True)
+            def pytest_timeout_set_timer(self, item, settings):
+                pass
+
+            @pytest.hookspec(firstresult=True)
+            def pytest_timeout_cancel_timer(self, item):
+                pass
+
+        called = []
+
+        class Original:
+            @pytest.hookimpl
+            def pytest_timeout_set_timer(self, item, settings):
+                called.append(("set", item, settings))
+                return True
+
+            @pytest.hookimpl
+            def pytest_timeout_cancel_timer(self, item):
+                called.append(("cancel", item))
+                return True
+
+        manager = pluggy.PluginManager("pytest")
+        manager.add_hookspecs(Specification)
+        manager.register(Original())
+        manager.register(SimpleNamespace(
+            pytest_timeout_set_timer=diag_plugin.pytest_timeout_set_timer,
+            pytest_timeout_cancel_timer=diag_plugin.pytest_timeout_cancel_timer,
+        ))
+        manager.check_pending()
+        item = object()
+        settings = SimpleNamespace(method="thread", timeout=20)
+        self.assertIs(manager.hook.pytest_timeout_set_timer(item=item, settings=settings), True)
+        self.assertIs(manager.hook.pytest_timeout_cancel_timer(item=item), True)
+        self.assertEqual(called, [("set", item, settings), ("cancel", item)])
+        self.assertEqual([s["kind"] for s in self.trace.spans],
+                         ["pytest_timeout_set_timer", "pytest_timeout_cancel_timer"])
+
     def test_local_activation_is_rejected(self):
         with patch.object(runtime, "TRACE", None), patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
             with self.assertRaisesRegex(RuntimeError, "hosted"):

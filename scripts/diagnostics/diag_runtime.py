@@ -136,16 +136,14 @@ class Recorder:
             }) + "\n")
 
 
-def wrap_method(owner, name, kind, after=None, details=None):
+def wrap_method(owner, name, kind, after=None):
     original = getattr(owner, name)
     if getattr(original, "_fastapi_diagnostic", False) is True:
         raise RuntimeError(f"Diagnostic method already wrapped: {kind}")
 
     @functools.wraps(original)
     def measured(*args, **kwargs):
-        with TRACE.span(kind) as span:
-            if details is not None:
-                span.update(details(args, kwargs))
+        with TRACE.span(kind):
             value = original(*args, **kwargs)
             if after is not None:
                 after(args, kwargs, value)
@@ -183,23 +181,8 @@ def patch_cov_engine(module):
                 wrap_method(owner, method, f"pytest_cov.{name}.{method}")
 
 
-def patch_timeout(module):
-    def settings(args, kwargs):
-        value = kwargs.get("settings") if "settings" in kwargs else args[1]
-        effective = value.method
-        if effective == "signal" and threading.current_thread() is not threading.main_thread():
-            effective = "thread"
-        return {"configured_method": value.method, "effective_method": effective,
-                "timeout_seconds": value.timeout}
-
-    for name in ("pytest_timeout_set_timer", "pytest_timeout_cancel_timer"):
-        wrap_method(module, name, name, details=settings if name.endswith("set_timer") else None)
-
-
 PATCHERS = {
     "coverage.control": patch_coverage,
-    "pytest_cov.engine": patch_cov_engine,
-    "pytest_timeout": patch_timeout,
 }
 
 

@@ -1,6 +1,8 @@
 """Loaded only with PYTEST_PLUGINS in the diagnostic invocation."""
 
 import os
+import sys
+import threading
 from importlib.metadata import version
 
 import pytest
@@ -20,6 +22,10 @@ def pytest_configure(config):
     worker = getattr(config, "workerinput", {}).get("workerid", "")
     current.worker = worker
     current.role = "worker" if worker else "controller"
+    if "pytest_cov.engine" not in sys.modules or config.pluginmanager.getplugin("_cov") is None:
+        raise RuntimeError("The original pytest-cov controller is unavailable.")
+    # Pytest can import its plugins through assertion rewriting, ahead of PathFinder.
+    diag_runtime.patch_cov_engine(sys.modules["pytest_cov.engine"])
     if os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS") != "2":
         raise RuntimeError("Diagnostics require exactly two workers.")
     if float(config.getini("timeout")) != 20:
@@ -111,4 +117,22 @@ def pytest_configure_node(node):
 def pytest_testnodedown(node, error):
     with trace().span("worker_down", worker=node.gateway.id,
                       worker_error=bool(error)):
+        return (yield)
+
+
+@pytest.hookimpl(optionalhook=True, wrapper=True, tryfirst=True)
+def pytest_timeout_set_timer(item, settings):
+    effective = settings.method
+    if effective == "signal" and threading.current_thread() is not threading.main_thread():
+        effective = "thread"
+    with trace().span(
+        "pytest_timeout_set_timer", configured_method=settings.method,
+        effective_method=effective, timeout_seconds=settings.timeout,
+    ):
+        return (yield)
+
+
+@pytest.hookimpl(optionalhook=True, wrapper=True, tryfirst=True)
+def pytest_timeout_cancel_timer(item):
+    with trace().span("pytest_timeout_cancel_timer"):
         return (yield)
