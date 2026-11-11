@@ -146,7 +146,7 @@ def summarize(traces, invocation, platform):
             raise ValueError("Missing timeout cancellation trace.")
         if any(s["error"] for s in timer):
             raise ValueError("A measured timeout hook failed.")
-        expected_method = "thread" if platform == "windows-x64" else "signal"
+        expected_method = "thread" if platform.startswith("windows-") else "signal"
         if any(
             s.get("effective_method") != expected_method or s.get("timeout_seconds") != 20
             for s in span_kind(worker, "pytest_timeout_set_timer")
@@ -238,8 +238,8 @@ def summarize(traces, invocation, platform):
             "posix_only": parent["target_function"] == "test_environment_export_initializes_after_fork",
         })
     common_children = [r for r in subprocess_rows if not r["posix_only"]]
-    if len(common_children) != 43 or len(parents) != (44 if platform == "linux-x64" else 43):
-        raise ValueError("Expected 43 common isolated tests plus the Linux-only fork case.")
+    if len(common_children) != 43 or len(parents) != (43 if platform.startswith("windows-") else 44):
+        raise ValueError("Expected 43 common isolated tests plus the POSIX-only fork case.")
     coverage_rows = [
         {
             "role": data["role"], "worker": data["worker"], "call_token": data["call_token"],
@@ -312,6 +312,62 @@ def save_csv(path, rows):
         writer.writerows(rows)
 
 
+def mechanisms(traces, platform):
+    rows = []
+    backends = []
+    for data in traces:
+        for row in data.get("operation_counters", []):
+            if (
+                type(row["calls"]) is not int or row["calls"] < 1
+                or not 0 <= row["errors"] <= row["calls"]
+                or min(row["wall_ns"], row["cpu_ns"], row["input_units"], row["output_units"]) < 0
+            ):
+                raise ValueError("Invalid aggregate operation measurement.")
+            rows.append({
+                "role": data["role"], "worker": data["worker"], "call_token": data["call_token"],
+                "operation": row["operation"], "scope": row["scope"], "variant": row["variant"],
+                "calls": row["calls"], "errors": row["errors"],
+                "wall_seconds": seconds(row["wall_ns"]), "process_cpu_seconds": seconds(row["cpu_ns"]),
+                "mean_wall_microseconds": row["wall_ns"] / row["calls"] / 1000,
+                "input_units": row["input_units"], "output_units": row["output_units"],
+            })
+        backends.extend({
+            "role": data["role"], "worker": data["worker"], "call_token": data["call_token"], **row,
+        } for row in data.get("backend_observations", []))
+    controller = one([data for data in traces if data["role"] == "controller"], "controller")
+    required = {
+        "coverage.sqlitedb._connect", "coverage.sqlitedb.close", "coverage.sqldata._init_db",
+        "coverage.numbits.decode", "coverage.parser.parse_source", "coverage.files.abs_file",
+    }
+    if not required.issubset(set(controller["patches"])):
+        raise ValueError("Some aggregate coverage hooks were not installed.")
+    first_report = min(s["start_ns"] for s in span_kind(controller, "coverage.report"))
+    installed_modules = {
+        event["module"] for event in controller["events"]
+        if event["kind"] == "mechanism_hooks_installed" and event["at_ns"] < first_report
+    }
+    if not {"coverage.sqlitedb", "coverage.sqldata", "coverage.numbits",
+            "coverage.parser", "coverage.files"}.issubset(installed_modules):
+        raise ValueError("Counter attachment before reporting is not evidenced.")
+    for purpose in ("total_only", "term_missing_skip_covered"):
+        observed = {
+            row["operation"] for row in rows
+            if row["role"] == "controller" and row["scope"] == "coverage.report:" + purpose
+        }
+        if not observed:
+            raise ValueError("Coverage report operation counters are incomplete.")
+    for worker in ("gw0", "gw1"):
+        if not any(row["role"] == "worker" and row["worker"] == worker
+                   and row["operation"] == "testclient_http_asgi" for row in backends):
+            raise ValueError("Real TestClient backend dispatches were not observed on both workers.")
+    if not any(row.get("http_client_module") == "httpx2" for row in backends):
+        raise ValueError("The actual TestClient HTTP library binding was not observed.")
+    return {"operation_counters": rows, "backend_observations": backends,
+            "controller_counter_hooks": sorted(required),
+            "zero_count_rule": "A missing operation row is zero only within an observed scope with its hook installed beforehand; otherwise it is unknown.",
+            "scope": "Inclusive aggregate wrapper intervals; nested operations are not additive."}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
@@ -320,11 +376,21 @@ def main():
     inputs = json.loads((root / "inputs.json").read_text("utf-8"))
     invocation = json.loads((root / "invocation.json").read_text("utf-8"))
     baseline = json.loads((root / "baseline-check.json").read_text("utf-8"))
-    if invocation["returncode"] != 0 or baseline["matched"] is not True:
+    if (
+        invocation["returncode"] != 0 or baseline["matched"] is not True
+        or baseline.get("coverage_matched") is not True
+    ):
         raise ValueError("The complete diagnostic test invocation did not match its baseline.")
-    data = summarize(load_traces(root / "traces"), invocation, inputs["platform"])
+    traces = load_traces(root / "traces")
+    data = summarize(traces, invocation, inputs["platform"])
+    data["implementation"] = mechanisms(traces, inputs["platform"])
+    implementation = json.loads((root / "implementation.json").read_text("utf-8"))
+    if implementation["python"]["machine"].lower() not in {"arm64", "aarch64"}:
+        raise ValueError("Post-workload metadata does not confirm native ARM64.")
     for field in ("workers", "telemetry_subprocesses", "item_phases", "item_protocols", "timeout_hooks", "coverage_calls"):
         save_csv(root / (field + ".csv"), data[field])
+    for field in ("operation_counters", "backend_observations"):
+        save_csv(root / (field + ".csv"), data["implementation"][field])
     (root / "analysis.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     critical = data["critical_path"]
     lines = ["# Test diagnostic (one instrumented sample)", "", f"Platform: {inputs['platform']}", ""]

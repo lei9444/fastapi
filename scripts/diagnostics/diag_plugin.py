@@ -22,6 +22,7 @@ def pytest_configure(config):
     worker = getattr(config, "workerinput", {}).get("workerid", "")
     current.worker = worker
     current.role = "worker" if worker else "controller"
+    diag_runtime.attach_loaded_observers()
     if "pytest_cov.engine" not in sys.modules or config.pluginmanager.getplugin("_cov") is None:
         raise RuntimeError("The original pytest-cov controller is unavailable.")
     # Pytest can import its plugins through assertion rewriting, ahead of PathFinder.
@@ -64,6 +65,7 @@ def pytest_collection(session):
 
 @pytest.hookimpl
 def pytest_collection_finish(session):
+    diag_runtime.attach_loaded_observers()
     trace().event("collection_finished", nodeids=[item.nodeid for item in session.items])
 
 

@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import os
+import struct
 import tempfile
 import unittest
 from io import StringIO
@@ -15,9 +16,11 @@ from unittest.mock import Mock, patch
 
 import analyze_diagnostic as analysis
 import diag_runtime as runtime
+import diag_mechanisms as mechanisms
+import diag_metadata as metadata
 
 
-def synthetic():
+def synthetic(platform="windows-x64"):
     counter = 0
 
     def span(kind, start, end, nodeid="", **detail):
@@ -29,7 +32,10 @@ def synthetic():
             "error": "", **detail,
         }
 
-    nodeids = [f"tests/test_synthetic.py::test_case[{i}]" for i in range(43)]
+    posix = not platform.startswith("windows-")
+    count = 44 if posix else 43
+    method = "signal" if posix else "thread"
+    nodeids = [f"tests/test_synthetic.py::test_case[{i}]" for i in range(count)]
     workers = []
     children = []
     for number in range(2):
@@ -39,27 +45,28 @@ def synthetic():
             "entry_ns": 1, "call_token": "", "spans": [],
             "events": [
                 {"kind": "pytest_configure", "at_ns": 2, "timeout": 20,
-                 "timeout_func_only": False, "timeout_method": "thread"},
+                 "timeout_func_only": False, "timeout_method": method},
                 {"kind": "collection_finished", "nodeids": nodeids},
                 {"kind": "coverage_core", "tracer": "SyntheticTracer",
                  "tracer_module": "synthetic", "dynamic_context": None, "branch": False},
             ],
         }
         worker["spans"].append(span("pytest_collection", 2, 10))
-        for i in range(number, 43, 2):
+        for i in range(number, count, 2):
             start = 20 + i * 100
             token = f"child-{i}"
             worker["spans"].append(span("item_protocol", start, start + 90, nodeids[i]))
             worker["spans"].append(span(
                 "pytest_timeout_set_timer", start, start + 1, nodeids[i],
-                effective_method="thread", timeout_seconds=20,
+                effective_method=method, timeout_seconds=20,
             ))
             worker["spans"].append(span("item_setup", start + 1, start + 9, nodeids[i]))
             worker["spans"].append(span("item_call", start + 10, start + 80, nodeids[i]))
             worker["spans"].append(span("item_teardown", start + 80, start + 85, nodeids[i]))
             worker["spans"].append(span("pytest_timeout_cancel_timer", start + 85, start + 89, nodeids[i]))
             worker["spans"].append(span("telemetry_parent_wait", start + 10, start + 80, nodeids[i],
-                                         call_token=token, target_module="synthetic", target_function="test_case"))
+                                         call_token=token, target_module="synthetic",
+                                         target_function="test_environment_export_initializes_after_fork" if i == 43 else "test_case"))
             children.append({
                 "role": "telemetry-child", "worker": "", "clock": "synthetic",
                 "call_token": token, "entry_ns": start + 20,
@@ -71,21 +78,21 @@ def synthetic():
                     span("coverage.save", start + 62, start + 66),
                 ],
             })
-        worker["spans"].append(span("pytest_cov.DistWorker.finish", 4400, 4450 + number))
+        worker["spans"].append(span("pytest_cov.DistWorker.finish", 5000, 5050 + number))
         workers.append(worker)
     controller = {
         "role": "controller", "worker": "", "clock": "synthetic", "call_token": "",
         "events": [], "spans": [
-            span("pytest_cov.DistMaster.finish", 4460, 4500),
-            span("coverage.combine", 4470, 4490),
-            span("pytest_cov.CovController.summary", 4505, 4600),
-            span("coverage.report", 4510, 4520, report_purpose="total_only", report_returned_total=99.0),
-            span("coverage.report", 4521, 4540, report_purpose="term_missing_skip_covered", report_returned_total=99.0),
-            span("coverage.xml_report", 4540, 4570),
-            span("coverage.json_report", 4570, 4590),
+            span("pytest_cov.DistMaster.finish", 5060, 5100),
+            span("coverage.combine", 5070, 5090),
+            span("pytest_cov.CovController.summary", 5105, 5200),
+            span("coverage.report", 5110, 5120, report_purpose="total_only", report_returned_total=99.0),
+            span("coverage.report", 5121, 5140, report_purpose="term_missing_skip_covered", report_returned_total=99.0),
+            span("coverage.xml_report", 5140, 5170),
+            span("coverage.json_report", 5170, 5190),
         ],
     }
-    return [controller, *workers, *children], {"start_ns": 0, "end_ns": 4700}
+    return [controller, *workers, *children], {"start_ns": 0, "end_ns": 5300}
 
 
 class SyntheticChecks(unittest.TestCase):
@@ -413,6 +420,162 @@ class SyntheticChecks(unittest.TestCase):
         report.pop("report_purpose")
         with self.assertRaisesRegex(ValueError, "total-only"):
             analysis.summarize(traces, invocation, "windows-x64")
+
+    def test_scoped_counter_preserves_return_arguments_and_exception(self):
+        sentinel = object()
+        original = Mock(return_value=sentinel)
+        owner = SimpleNamespace(method=original)
+        mechanisms.counted(owner, "method", "fixture.operation", runtime)
+        with self.trace.span("coverage.report", report_purpose="total_only"):
+            self.assertIs(owner.method(3, value=4), sentinel)
+        original.assert_called_once_with(3, value=4)
+        failure = ValueError("same failure")
+        original.side_effect = failure
+        with self.assertRaises(ValueError) as caught:
+            owner.method("next")
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(list(Path(self.directory.name).iterdir()), [])
+        self.trace.flush()
+        value = analysis.load_traces(Path(self.directory.name))[0]
+        counters = value["operation_counters"]
+        self.assertEqual(sum(r["calls"] for r in counters), 2)
+        self.assertEqual(sum(r["errors"] for r in counters), 1)
+        self.assertEqual({r["scope"] for r in counters},
+                         {"coverage.report:total_only", "outside_observed_span"})
+
+    def test_sqlite_counter_distinguishes_new_noop_close_without_replacement(self):
+        class Database:
+            def __init__(self):
+                self.con = None
+                self.no_disk = False
+
+            def _connect(self):
+                if self.con is None:
+                    self.con = object()
+
+            def close(self, force=False):
+                if self.con is not None and (force or not self.no_disk):
+                    self.con = None
+
+        module = SimpleNamespace(__name__="coverage.sqlitedb", SqliteDb=Database)
+        mechanisms.install(module, runtime)
+        db = Database()
+        db._connect()
+        first = db.con
+        db._connect()
+        self.assertIs(db.con, first)
+        db.close()
+        self.assertIsNone(db.con)
+        db.close(force=True)
+        counts = {row["variant"]: row["calls"] for buffer in self.trace.counter_buffers for row in buffer.values()}
+        self.assertEqual(counts, {"new_connection_and_initialization": 1, "already_connected": 1,
+                                  "close_connection": 1, "no_connection": 1})
+
+    def test_counter_alias_and_work_units_are_preserved(self):
+        original = lambda values: list(values)
+        module = SimpleNamespace(__name__="coverage.numbits", numbits_to_nums=original)
+        mechanisms.install(module, runtime)
+        imported_alias = module.numbits_to_nums
+        self.assertEqual(imported_alias(b"abc"), [97, 98, 99])
+        row = self.trace.counter_buffers[0][("coverage.numbits.decode", "outside_observed_span", "")]
+        self.assertEqual((row["calls"], row["input_units"], row["output_units"]), (1, 3, 3))
+
+    def test_actual_portal_wrapper_observes_and_forwards_without_starting_a_loop(self):
+        calls = []
+        expected = object()
+
+        class FakeBackend:
+            pass
+
+        class FakeLoop:
+            _selector = object()
+
+        class Portal:
+            _token = SimpleNamespace(backend_class=FakeBackend, native_token=FakeLoop())
+
+            async def _call_func(self, func, args, kwargs, future):
+                calls.append((func, args, kwargs, future))
+                return expected
+
+        def receive():
+            pass
+
+        def send():
+            pass
+
+        receive.__module__ = send.__module__ = "starlette.testclient"
+        function, future = object(), object()
+        args, kwargs = ({"type": "http"}, receive, send), {}
+        mechanisms.patch_portal(SimpleNamespace(BlockingPortal=Portal), runtime)
+        coroutine = Portal()._call_func(function, args, kwargs, future)
+        with self.assertRaises(StopIteration) as finished:
+            coroutine.send(None)
+        self.assertIs(finished.exception.value, expected)
+        self.assertEqual(calls, [(function, args, kwargs, future)])
+        observations = [r for buffer in self.trace.observation_buffers for r in buffer.values()]
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["calls"], 1)
+        self.assertEqual(observations[0]["operation"], "testclient_http_asgi")
+        self.assertIn("FakeLoop", observations[0]["native_token_type"])
+        self.assertEqual(observations[0]["proactor_type"], "not_exposed")
+        self.assertIsNone(mechanisms.portal_facts(Portal(), object(), ({"type": "http"}, object(), object())))
+
+    def test_mac_io_counter_absence_is_explicit(self):
+        self.trace.process = SimpleNamespace()
+        with patch.dict("sys.modules", {"psutil": SimpleNamespace(Error=RuntimeError)}):
+            with patch.object(runtime.sys, "platform", "darwin"):
+                self.assertIn("not supported on darwin", self.trace.io()["unavailable"])
+
+    def test_pe_and_macho_architectures_use_headers_not_filenames(self):
+        path = Path(self.directory.name) / "fixture.bin"
+        pe = bytearray(256)
+        pe[:2] = b"MZ"
+        struct.pack_into("<I", pe, 0x3C, 128)
+        pe[128:132] = b"PE\0\0"
+        struct.pack_into("<H", pe, 132, 0xAA64)
+        path.write_bytes(pe)
+        self.assertEqual(metadata.binary_architectures(path)["architectures"], ["arm64"])
+        path.write_bytes(b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x0100000C) + b"\0" * 24)
+        self.assertEqual(metadata.binary_architectures(path)["architectures"], ["arm64"])
+        fat = b"\xca\xfe\xba\xbe" + struct.pack(">I", 2)
+        fat += struct.pack(">IIIII", 0x01000007, 0, 0, 0, 0)
+        fat += struct.pack(">IIIII", 0x0100000C, 0, 0, 0, 0)
+        path.write_bytes(fat)
+        self.assertEqual(metadata.binary_architectures(path)["architectures"], ["x64", "arm64"])
+        path.write_bytes(b"\xca\xfe\xba\xbe" + struct.pack(">I", 999))
+        with self.assertRaises(ValueError):
+            metadata.binary_architectures(path)
+
+    def test_native_macos_gate_does_not_accept_x64_emulation(self):
+        import run_diagnostic
+
+        env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+               "PLATFORM": "macos-arm64", "RUNNER_ARCH": "ARM64"}
+        with patch.dict(os.environ, env):
+            with patch.object(run_diagnostic.sys, "platform", "darwin"):
+                with patch.object(run_diagnostic.platform, "python_version", return_value="3.13.17"):
+                    with patch.object(run_diagnostic.platform, "machine", return_value="arm64"):
+                        run_diagnostic.require_hosted()
+                    with patch.object(run_diagnostic.platform, "machine", return_value="x86_64"):
+                        with self.assertRaises(RuntimeError):
+                            run_diagnostic.require_hosted()
+
+    def test_macos_synthetic_timeline_requires_the_posix_child(self):
+        traces, invocation = synthetic()
+        for data in traces:
+            for event in data["events"]:
+                if event["kind"] == "pytest_configure":
+                    event["timeout_method"] = "signal"
+            for span in data["spans"]:
+                if span["kind"] == "pytest_timeout_set_timer":
+                    span["effective_method"] = "signal"
+        with self.assertRaisesRegex(ValueError, "POSIX-only"):
+            analysis.summarize(traces, invocation, "macos-arm64")
+        traces, invocation = synthetic("macos-arm64")
+        result = analysis.summarize(traces, invocation, "macos-arm64")
+        self.assertEqual(len(result["telemetry_subprocesses"]), 44)
+        self.assertEqual(sum(row["posix_only"] for row in result["telemetry_subprocesses"]), 1)
+        self.assertEqual({row["timeout_method"] for row in result["workers"]}, {"signal"})
 
     def test_local_activation_is_rejected(self):
         with patch.object(runtime, "TRACE", None), patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):

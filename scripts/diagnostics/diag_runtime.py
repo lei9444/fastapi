@@ -37,6 +37,7 @@ class Span:
             **self.detail,
         }
         stack.append(self.record["id"])
+        self.trace.records().append(self.record)
         return self.record
 
     def __exit__(self, exception_type, exception, traceback):
@@ -45,6 +46,8 @@ class Span:
         self.record["error"] = exception_type.__name__ if exception_type else ""
         if self.trace.stack().pop() != self.record["id"]:
             raise RuntimeError("Diagnostic span nesting changed.")
+        if self.trace.records().pop() is not self.record:
+            raise RuntimeError("Diagnostic operation scope changed.")
         self.trace.spans.append(self.record)
         return False
 
@@ -70,6 +73,8 @@ class Recorder:
         self.flushed = False
         self.patches = []
         self.process = None
+        self.counter_buffers = []
+        self.observation_buffers = []
 
     def ensure_process(self):
         if self.pid != os.getpid():
@@ -87,6 +92,45 @@ class Recorder:
         self.sequence += 1
         return self.sequence
 
+    def records(self):
+        if not hasattr(self.local, "records"):
+            self.local.records = []
+        return self.local.records
+
+    def counter(self, operation, variant=""):
+        self.ensure_process()
+        if not hasattr(self.local, "counters"):
+            self.local.counters = {}
+            self.counter_buffers.append(self.local.counters)
+        scope = "outside_observed_span"
+        for record in reversed(self.records()):
+            if record["kind"].startswith("coverage."):
+                scope = record["kind"]
+                if record.get("report_purpose"):
+                    scope += ":" + record["report_purpose"]
+                break
+        else:
+            if self.records():
+                scope = self.records()[-1]["kind"]
+        key = (operation, scope, variant)
+        if key not in self.local.counters:
+            self.local.counters[key] = {
+                "operation": operation, "scope": scope, "variant": variant,
+                "calls": 0, "errors": 0, "wall_ns": 0, "cpu_ns": 0,
+                "input_units": 0, "output_units": 0,
+            }
+        return self.local.counters[key]
+
+    def observe(self, facts):
+        self.ensure_process()
+        if not hasattr(self.local, "observations"):
+            self.local.observations = {}
+            self.observation_buffers.append(self.local.observations)
+        key = tuple(sorted(facts.items()))
+        if key not in self.local.observations:
+            self.local.observations[key] = {**facts, "calls": 0}
+        self.local.observations[key]["calls"] += 1
+
     def span(self, kind, **detail):
         return Span(self, kind, detail)
 
@@ -102,6 +146,8 @@ class Recorder:
             return None
         import psutil
 
+        if not hasattr(self.process, "io_counters"):
+            return {"unavailable": "psutil.Process.io_counters is not supported on " + sys.platform}
         try:
             value = self.process.io_counters()
         except (psutil.Error, OSError) as exc:
@@ -116,6 +162,21 @@ class Recorder:
         self.flushed = True
         start = time.monotonic_ns()
         self.event("flush_start", reason=reason, io=self.io())
+        counters = {}
+        for buffer in self.counter_buffers:
+            for key, row in buffer.items():
+                if key not in counters:
+                    counters[key] = dict(row)
+                else:
+                    for field in ("calls", "errors", "wall_ns", "cpu_ns", "input_units", "output_units"):
+                        counters[key][field] += row[field]
+        observations = {}
+        for buffer in self.observation_buffers:
+            for key, row in buffer.items():
+                if key not in observations:
+                    observations[key] = dict(row)
+                else:
+                    observations[key]["calls"] += row["calls"]
         payload = {
             "schema": 1, "process": self.process_key, "role": self.role,
             "worker": self.worker, "call_token": self.call_token,
@@ -124,6 +185,8 @@ class Recorder:
             "clock": time.get_clock_info("monotonic").implementation,
             "patches": self.patches, "spans": self.spans, "events": self.events,
             "open_spans": list(self.stack()), "flush_start_ns": start,
+            "operation_counters": list(counters.values()),
+            "backend_observations": list(observations.values()),
         }
         path = self.directory / f"trace-{self.process_key}.jsonl"
         with path.open("x", encoding="utf-8") as stream:
@@ -133,6 +196,8 @@ class Recorder:
                 "write_finished_ns": time.monotonic_ns(),
                 "buffered_spans": len(self.spans),
                 "buffered_events": len(self.events),
+                "operation_counter_rows": len(counters),
+                "backend_observation_rows": len(observations),
             }) + "\n")
 
 
@@ -219,6 +284,28 @@ def patch_cov_engine(module):
 PATCHERS = {
     "coverage.control": patch_coverage,
 }
+
+
+def patch_mechanism_module(module):
+    import diag_mechanisms
+
+    before = len(TRACE.patches)
+    diag_mechanisms.install(module, sys.modules[__name__])
+    if len(TRACE.patches) != before:
+        TRACE.event("mechanism_hooks_installed", module=module.__name__)
+
+
+for _module_name in (
+    "coverage.sqlitedb", "coverage.sqldata", "coverage.numbits",
+    "coverage.parser", "coverage.files", "anyio.from_thread", "starlette.testclient",
+):
+    PATCHERS[_module_name] = patch_mechanism_module
+
+
+def attach_loaded_observers():
+    for name in ("anyio.from_thread", "starlette.testclient"):
+        if name in sys.modules:
+            patch_mechanism_module(sys.modules[name])
 
 
 class DiagnosticLoader:

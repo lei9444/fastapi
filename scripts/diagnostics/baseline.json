@@ -8,5 +8,21 @@
     "baseline_run": "42752473021",
     "baseline_commit": "4d047839db5185c24aa16e116c619edbfba6cf3a",
     "manifest_sha256": "9c5dc64d70dffafafe8309515cd4f061bb3fba3cb4dbc16f9d28b8b147c5cdb6"
+  },
+  "windows-arm64": {
+    "baseline_run": "42752473021",
+    "baseline_commit": "4d047839db5185c24aa16e116c619edbfba6cf3a",
+    "manifest_sha256": "2ba76d4021b21c58be096dfead7bd53dd06d2b5af836572b931eb056e231bf67",
+    "coverage_sha256": ["d100a42232ab60c8ad3d41803034ed8f2538939ea3d5abd384c4cc3b01598fb2"]
+  },
+  "macos-arm64": {
+    "baseline_run": "42752473021",
+    "baseline_commit": "4d047839db5185c24aa16e116c619edbfba6cf3a",
+    "manifest_sha256": "9c5dc64d70dffafafe8309515cd4f061bb3fba3cb4dbc16f9d28b8b147c5cdb6",
+    "coverage_sha256": [
+      "baa1acd9c89301151a29e5f6687b22c2d7841c0d2ba92adb936bd3b4914764c5",
+      "e1ee5a9e86da1079b7ee09c62f6d3d5a57bc23b420d2697d5f5ae4b030d7f339"
+    ],
+    "coverage_variation": "The original Mac samples differ only in coverage of tests/test_tutorial/test_debugging/test_tutorial001.py:36. Accept an exact historical full-file fingerprint, not arbitrary line changes."
   }
 }

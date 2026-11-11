@@ -41,14 +41,29 @@ def manifest_hash(rows):
     return hashlib.sha256(json.dumps(rows, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
 
+def coverage_fingerprint(path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    normalized = {
+        name.replace("\\", "/"): {
+            key: value[key] for key in ("summary", "executed_lines", "missing_lines", "excluded_lines")
+        }
+        for name, value in data["files"].items()
+    }
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def require_hosted():
     if (
         os.environ.get("GITHUB_ACTIONS") != "true"
         or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
-        or os.environ.get("PLATFORM") not in {"windows-x64", "linux-x64"}
+        or os.environ.get("PLATFORM") not in {"windows-arm64", "macos-arm64"}
+        or os.environ.get("RUNNER_ARCH") != "ARM64"
         or platform.python_version() != "3.13.17"
     ):
-        raise RuntimeError("The diagnostic workload requires the authorized hosted x64 job.")
+        raise RuntimeError("The diagnostic workload requires the authorized hosted ARM64 job.")
+    expected_os = "win32" if os.environ["PLATFORM"] == "windows-arm64" else "darwin"
+    if sys.platform != expected_os or platform.machine().lower() not in {"arm64", "aarch64"}:
+        raise RuntimeError("The diagnostic interpreter is not running natively on the intended ARM platform.")
 
 
 def prepare():
@@ -73,6 +88,14 @@ def invoke(output):
     result.workers = 2
     common.write_result(result, output)
     bash = common.find_bash()
+    import diag_runtime
+
+    if diag_runtime.TRACE is None:
+        raise RuntimeError("The invocation bootstrap did not attach.")
+    diag_runtime.TRACE.event(
+        "actual_test_launch", bash=bash, executable=sys.executable,
+        machine=platform.machine(), workers=2,
+    )
     return subprocess.call(
         [
             bash, "scripts/test-cov.sh",
@@ -113,7 +136,7 @@ def run(output):
         commit=os.environ["GITHUB_SHA"], run_id=os.environ["GITHUB_RUN_ID"],
         run_attempt=os.environ["GITHUB_RUN_ATTEMPT"],
         runner_label=os.environ["RUNNER_LABEL"], runner_os=os.environ["RUNNER_OS"],
-        runner_arch=os.environ["RUNNER_ARCH"], expected_architecture="x64",
+        runner_arch=os.environ["RUNNER_ARCH"], expected_architecture="arm64",
         image_os=os.environ.get("ImageOS", ""), image_version=os.environ.get("ImageVersion", ""),
     )
     common.record_interpreter(result)
@@ -160,9 +183,12 @@ def run(output):
         write_json(output / "test-manifest.json", rows)
         expected = json.loads((Path(__file__).parent / "baseline.json").read_text("utf-8"))
         matched = manifest_hash(rows) == expected[result.platform]["manifest_sha256"]
+        actual_coverage = coverage_fingerprint(output / "coverage.json")
+        coverage_matched = actual_coverage in expected[result.platform]["coverage_sha256"]
         write_json(output / "baseline-check.json", {
             "matched": matched, "records": len(rows),
             "actual_sha256": manifest_hash(rows), **expected[result.platform],
+            "coverage_matched": coverage_matched, "actual_coverage_sha256": actual_coverage,
         })
         tree = ET.parse(output / "junit.xml")
         for suite in tree.iter("testsuite"):
@@ -170,10 +196,15 @@ def run(output):
         tree.write(output / "junit.xml", encoding="utf-8", xml_declaration=True)
         if not matched:
             raise RuntimeError("Diagnostic test IDs/outcomes/skips differ from the baseline.")
+        if not coverage_matched:
+            raise RuntimeError("Diagnostic coverage file summaries or line sets differ from the baseline.")
     else:
         raise RuntimeError("Diagnostic JUnit evidence is missing.")
     if code != 0:
         raise RuntimeError(f"The single diagnostic test invocation failed with exit {code}.")
+    from diag_metadata import collect
+
+    write_json(output / "implementation.json", collect(common.find_bash()))
 
 
 def main():
