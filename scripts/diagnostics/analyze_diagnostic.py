@@ -14,6 +14,10 @@ def duration(span):
     return seconds(span["end_ns"] - span["start_ns"])
 
 
+def cpu_duration(span):
+    return seconds(span["cpu_end_ns"] - span["cpu_start_ns"])
+
+
 def union_ns(intervals):
     total = 0
     end = None
@@ -61,7 +65,10 @@ def load_traces(directory):
         data, footer = [json.loads(line) for line in lines]
         if data["open_spans"] and data["role"] != "fork-child":
             raise ValueError(f"Unclosed diagnostic spans in {path.name}")
-        if footer["buffered_spans"] != len(data["spans"]):
+        if (
+            footer["buffered_spans"] != len(data["spans"])
+            or footer["buffered_events"] != len(data["events"])
+        ):
             raise ValueError(f"Diagnostic footer disagrees with {path.name}")
         data["write_finished_ns"] = footer["write_finished_ns"]
         ids = {span["id"] for span in data["spans"]}
@@ -127,11 +134,24 @@ def summarize(traces, invocation, platform):
         for span in timer:
             timeout_rows.append({
                 "worker": worker["worker"], "nodeid": span["nodeid"], "kind": span["kind"],
-                "seconds": duration(span), "error": span["error"],
+                "start_ns": span["start_ns"], "end_ns": span["end_ns"],
+                "seconds": duration(span), "cpu_seconds": cpu_duration(span), "error": span["error"],
                 "effective_method": span.get("effective_method", ""),
             })
         if Counter(s["nodeid"] for s in span_kind(worker, "pytest_timeout_set_timer")) != Counter(s["nodeid"] for s in items):
             raise ValueError("Missing or duplicated timeout set trace.")
+        expected_items = {s["nodeid"] for s in items}
+        cancels = span_kind(worker, "pytest_timeout_cancel_timer")
+        if {s["nodeid"] for s in cancels} != expected_items:
+            raise ValueError("Missing timeout cancellation trace.")
+        if any(s["error"] for s in timer):
+            raise ValueError("A measured timeout hook failed.")
+        expected_method = "thread" if platform == "windows-x64" else "signal"
+        if any(
+            s.get("effective_method") != expected_method or s.get("timeout_seconds") != 20
+            for s in span_kind(worker, "pytest_timeout_set_timer")
+        ):
+            raise ValueError("Unexpected measured timeout method or limit.")
         collection = one(span_kind(worker, "pytest_collection"), "full worker collection span")
         finish = one(span_kind(worker, "pytest_cov.DistWorker.finish"), "worker coverage finish")
         worker_rows.append({
@@ -143,11 +163,17 @@ def summarize(traces, invocation, platform):
             "setup_seconds": union(span_kind(worker, "item_setup")),
             "call_seconds": union(span_kind(worker, "item_call")),
             "teardown_seconds": union(span_kind(worker, "item_teardown")),
+            "collection_cpu_seconds": cpu_duration(collection),
             "timeout_method": configured["timeout_method"],
             "timeout_set_seconds": union(span_kind(worker, "pytest_timeout_set_timer")),
+            "timeout_set_cpu_seconds": sum(cpu_duration(s) for s in span_kind(worker, "pytest_timeout_set_timer")),
+            "timeout_set_calls": len(span_kind(worker, "pytest_timeout_set_timer")),
             "timeout_cancel_including_join_seconds": union(span_kind(worker, "pytest_timeout_cancel_timer")),
+            "timeout_cancel_cpu_seconds": sum(cpu_duration(s) for s in cancels),
+            "timeout_cancel_calls": len(cancels),
             "between_item_unassigned_seconds": seconds(items[-1]["end_ns"] - items[0]["start_ns"]) - union(items),
             "coverage_finish_seconds": duration(finish),
+            "coverage_finish_cpu_seconds": cpu_duration(finish),
             "coverage_finish_end_ns": finish["end_ns"],
         })
     if Counter(s["nodeid"] for s in protocols) != Counter(expected_collection):
@@ -157,6 +183,19 @@ def summarize(traces, invocation, platform):
     last_finish = max(row["coverage_finish_end_ns"] for row in worker_rows)
     master_finish = one(span_kind(controller, "pytest_cov.DistMaster.finish"), "controller coverage finish")
     master_summary = one(span_kind(controller, "pytest_cov.CovController.summary"), "controller coverage summary")
+    reports = sorted(span_kind(controller, "coverage.report"), key=lambda s: s["start_ns"])
+    total_report = one([s for s in reports if s.get("report_purpose") == "total_only"], "total-only Coverage.report")
+    terminal_report = one([s for s in reports if s.get("report_purpose") == "term_missing_skip_covered"], "configured terminal Coverage.report")
+    if (
+        len(reports) != 2 or any(s["error"] for s in reports)
+        or total_report.get("report_returned_total") is None
+        or total_report["report_returned_total"] != terminal_report.get("report_returned_total")
+        or not (
+            master_summary["start_ns"] <= total_report["start_ns"] <= total_report["end_ns"]
+            <= terminal_report["start_ns"] <= terminal_report["end_ns"] <= master_summary["end_ns"]
+        )
+    ):
+        raise ValueError("Coverage report purposes, ordering or returned totals disagree.")
     if not (last_item <= last_finish <= master_finish["end_ns"] <= master_summary["end_ns"] <= invocation["end_ns"]):
         raise ValueError("The observed critical-path boundaries do not match the invocation.")
     cores = [
@@ -181,6 +220,7 @@ def summarize(traces, invocation, platform):
             "target_module": parent["target_module"], "target_function": parent["target_function"],
             "parent_start_ns": parent["start_ns"], "parent_end_ns": parent["end_ns"],
             "parent_wait_seconds": duration(parent),
+            "parent_process_cpu_seconds": cpu_duration(parent),
             "launch_to_observable_pth_entry_seconds": seconds(child["entry_ns"] - parent["start_ns"]),
             "entry_to_target_import_seconds": seconds(imported["start_ns"] - child["entry_ns"]),
             "target_import_seconds": duration(imported),
@@ -206,6 +246,12 @@ def summarize(traces, invocation, platform):
             "kind": span["kind"], "start_ns": span["start_ns"], "end_ns": span["end_ns"],
             "seconds": duration(span), "cpu_seconds": seconds(span["cpu_end_ns"] - span["cpu_start_ns"]),
             "error": span["error"],
+            "report_purpose": span.get("report_purpose", ""),
+            "report_output_format_argument": span.get("report_output_format_argument"),
+            "report_show_missing_argument": span.get("report_show_missing_argument"),
+            "report_skip_covered_argument": span.get("report_skip_covered_argument"),
+            "report_stream_kind": span.get("report_stream_kind", ""),
+            "report_returned_total": span.get("report_returned_total"),
         }
         for data in traces for span in data["spans"]
         if span["kind"].startswith(("coverage.", "pytest_cov."))
@@ -221,18 +267,25 @@ def summarize(traces, invocation, platform):
         "last_item_worker": max(protocols, key=lambda s: s["end_ns"])["worker"],
         "last_coverage_worker": max(worker_rows, key=lambda r: r["coverage_finish_end_ns"])["worker"],
         "controller_coverage_finish_seconds": duration(master_finish),
+        "controller_coverage_finish_cpu_seconds": cpu_duration(master_finish),
         "controller_coverage_summary_seconds": duration(master_summary),
+        "controller_coverage_summary_cpu_seconds": cpu_duration(master_summary),
         "controller_combine_seconds": union(span_kind(controller, "coverage.combine")),
         "controller_xml_report_seconds": union(span_kind(controller, "coverage.xml_report")),
         "controller_json_report_seconds": union(span_kind(controller, "coverage.json_report")),
         "controller_report_calls_seconds": union(span_kind(controller, "coverage.report")),
+        "controller_total_only_report_seconds": duration(total_report),
+        "controller_total_only_report_cpu_seconds": cpu_duration(total_report),
+        "controller_term_missing_report_seconds": duration(terminal_report),
+        "controller_term_missing_report_cpu_seconds": cpu_duration(terminal_report),
     }
     active = union(protocols, first_item, last_item)
     critical["item_window_at_least_one_worker_active_seconds"] = active
     critical["item_window_neither_worker_in_protocol_seconds"] = seconds(last_item - first_item) - active
     critical["item_window_both_workers_active_seconds"] = sum(row["item_protocol_seconds"] for row in worker_rows) - active
+    critical["item_window_exactly_one_worker_active_seconds"] = 2 * active - sum(row["item_protocol_seconds"] for row in worker_rows)
     return {
-        "platform": platform, "critical_path": critical, "workers": worker_rows,
+        "status": "validated", "platform": platform, "critical_path": critical, "workers": worker_rows,
         "coverage_cores": cores, "telemetry_subprocesses": subprocess_rows,
         "item_phases": phase_rows, "timeout_hooks": timeout_rows, "coverage_calls": coverage_rows,
         "item_protocols": protocols, "trace_count": len(traces),
@@ -244,6 +297,7 @@ def summarize(traces, invocation, platform):
             "Child import spans observe outermost builtin import calls in the target/function thread, including cache hits; imports on other threads are not exhaustively traced.",
             "Exit residual includes shutdown, recorded coverage and diagnostic flush, pipes and process teardown.",
             "Coverage calls overlap/nest; use interval unions, not sum of all methods.",
+            "Coverage.report purposes come from the original bound call arguments: total-only then the requested term-missing/skip-covered report. Neither call was removed or reused.",
         ],
     }
 
@@ -265,8 +319,11 @@ def main():
     root = args.directory
     inputs = json.loads((root / "inputs.json").read_text("utf-8"))
     invocation = json.loads((root / "invocation.json").read_text("utf-8"))
+    baseline = json.loads((root / "baseline-check.json").read_text("utf-8"))
+    if invocation["returncode"] != 0 or baseline["matched"] is not True:
+        raise ValueError("The complete diagnostic test invocation did not match its baseline.")
     data = summarize(load_traces(root / "traces"), invocation, inputs["platform"])
-    for field in ("workers", "telemetry_subprocesses", "item_phases", "timeout_hooks", "coverage_calls"):
+    for field in ("workers", "telemetry_subprocesses", "item_phases", "item_protocols", "timeout_hooks", "coverage_calls"):
         save_csv(root / (field + ".csv"), data[field])
     (root / "analysis.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     critical = data["critical_path"]

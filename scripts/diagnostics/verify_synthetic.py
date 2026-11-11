@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -49,7 +50,10 @@ def synthetic():
             start = 20 + i * 100
             token = f"child-{i}"
             worker["spans"].append(span("item_protocol", start, start + 90, nodeids[i]))
-            worker["spans"].append(span("pytest_timeout_set_timer", start, start + 1, nodeids[i]))
+            worker["spans"].append(span(
+                "pytest_timeout_set_timer", start, start + 1, nodeids[i],
+                effective_method="thread", timeout_seconds=20,
+            ))
             worker["spans"].append(span("item_setup", start + 1, start + 9, nodeids[i]))
             worker["spans"].append(span("item_call", start + 10, start + 80, nodeids[i]))
             worker["spans"].append(span("item_teardown", start + 80, start + 85, nodeids[i]))
@@ -75,7 +79,8 @@ def synthetic():
             span("pytest_cov.DistMaster.finish", 4460, 4500),
             span("coverage.combine", 4470, 4490),
             span("pytest_cov.CovController.summary", 4505, 4600),
-            span("coverage.report", 4510, 4540),
+            span("coverage.report", 4510, 4520, report_purpose="total_only", report_returned_total=99.0),
+            span("coverage.report", 4521, 4540, report_purpose="term_missing_skip_covered", report_returned_total=99.0),
             span("coverage.xml_report", 4540, 4570),
             span("coverage.json_report", 4570, 4590),
         ],
@@ -285,6 +290,129 @@ class SyntheticChecks(unittest.TestCase):
         self.assertEqual(called, [("set", item, settings), ("cancel", item)])
         self.assertEqual([s["kind"] for s in self.trace.spans],
                          ["pytest_timeout_set_timer", "pytest_timeout_cancel_timer"])
+
+    def test_timeout_hook_exception_is_preserved(self):
+        import pluggy
+        import pytest
+
+        import diag_plugin
+
+        class Specification:
+            @pytest.hookspec(firstresult=True)
+            def pytest_timeout_cancel_timer(self, item):
+                pass
+
+        expected = RuntimeError("original cancellation failure")
+
+        class Original:
+            @pytest.hookimpl
+            def pytest_timeout_cancel_timer(self, item):
+                raise expected
+
+        manager = pluggy.PluginManager("pytest")
+        manager.add_hookspecs(Specification)
+        manager.register(Original())
+        manager.register(SimpleNamespace(pytest_timeout_cancel_timer=diag_plugin.pytest_timeout_cancel_timer))
+        with self.assertRaises(RuntimeError) as caught:
+            manager.hook.pytest_timeout_cancel_timer(item=object())
+        self.assertIs(caught.exception, expected)
+        self.assertEqual(self.trace.spans[-1]["error"], "RuntimeError")
+
+    def test_existing_controller_instance_is_patched_after_registration(self):
+        import diag_plugin
+
+        calls = []
+
+        class CovController:
+            def finish(self):
+                calls.append("base.finish")
+
+            def summary(self, stream):
+                calls.append(("summary", stream))
+                return 99.0
+
+        class Central(CovController):
+            pass
+
+        class DistMaster(CovController):
+            def finish(self):
+                calls.append("master.finish")
+
+        class DistWorker(CovController):
+            def finish(self):
+                super().finish()
+                calls.append("worker.finish")
+
+        engine = SimpleNamespace(
+            CovController=CovController, Central=Central,
+            DistMaster=DistMaster, DistWorker=DistWorker,
+        )
+        timeout_plugin = object()
+        existing_controller = DistMaster()
+        config = SimpleNamespace(
+            pluginmanager=SimpleNamespace(
+                getplugin=lambda name: SimpleNamespace(cov_controller=existing_controller) if name == "_cov" else None,
+                is_registered=lambda module: module is timeout_plugin,
+            ),
+            getini=lambda name: "20", _env_timeout_method="thread",
+            _env_timeout=20, _env_timeout_func_only=False,
+        )
+        with patch.dict("sys.modules", {"pytest_cov.engine": engine, "pytest_timeout": timeout_plugin}):
+            with patch.dict(os.environ, {"PYTEST_XDIST_AUTO_NUM_WORKERS": "2"}):
+                with patch.object(diag_plugin, "version", return_value="fixture"):
+                    diag_plugin.pytest_configure(config)
+        existing_controller.finish()
+        stream = object()
+        self.assertEqual(existing_controller.summary(stream), 99.0)
+        DistWorker().finish()
+        self.assertEqual(calls, ["master.finish", ("summary", stream), "base.finish", "worker.finish"])
+        self.assertEqual({s["kind"] for s in self.trace.spans}, {
+            "pytest_cov.DistMaster.finish", "pytest_cov.CovController.summary",
+            "pytest_cov.CovController.finish", "pytest_cov.DistWorker.finish",
+        })
+
+    def test_report_purposes_use_original_arguments_and_preserve_both_calls(self):
+        calls = []
+
+        class Coverage:
+            def report(self, morfs=None, show_missing=None, ignore_errors=None, file=None,
+                       skip_covered=None, precision=None, output_format=None):
+                calls.append((morfs, show_missing, ignore_errors, file, skip_covered, precision, output_format))
+                return 99.5
+
+        original_signature = inspect.signature(Coverage.report)
+        runtime.wrap_method(
+            Coverage, "report", "coverage.report", after=runtime.report_result,
+            details=runtime.report_details(original_signature),
+        )
+        total_sink, terminal_stream = object(), StringIO()
+        coverage = Coverage()
+        self.assertEqual(
+            coverage.report(ignore_errors=True, file=total_sink, precision=2, output_format="total"),
+            99.5,
+        )
+        self.assertEqual(
+            coverage.report(None, True, True, terminal_stream, True, 2),
+            99.5,
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertIs(calls[0][3], total_sink)
+        self.assertIs(calls[1][3], terminal_stream)
+        self.assertEqual([s["report_purpose"] for s in self.trace.spans],
+                         ["total_only", "term_missing_skip_covered"])
+        self.assertEqual([s["report_returned_total"] for s in self.trace.spans], [99.5, 99.5])
+        self.assertEqual(inspect.signature(Coverage.report), original_signature)
+
+    def test_missing_cancellation_or_report_label_is_rejected(self):
+        traces, invocation = synthetic()
+        traces[1]["spans"] = [s for s in traces[1]["spans"] if s["kind"] != "pytest_timeout_cancel_timer"]
+        with self.assertRaisesRegex(ValueError, "cancellation"):
+            analysis.summarize(traces, invocation, "windows-x64")
+        traces, invocation = synthetic()
+        report = next(s for s in traces[0]["spans"] if s["kind"] == "coverage.report")
+        report.pop("report_purpose")
+        with self.assertRaisesRegex(ValueError, "total-only"):
+            analysis.summarize(traces, invocation, "windows-x64")
 
     def test_local_activation_is_rejected(self):
         with patch.object(runtime, "TRACE", None), patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):

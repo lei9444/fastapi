@@ -136,17 +136,21 @@ class Recorder:
             }) + "\n")
 
 
-def wrap_method(owner, name, kind, after=None):
+def wrap_method(owner, name, kind, after=None, details=None):
     original = getattr(owner, name)
     if getattr(original, "_fastapi_diagnostic", False) is True:
         raise RuntimeError(f"Diagnostic method already wrapped: {kind}")
 
     @functools.wraps(original)
     def measured(*args, **kwargs):
-        with TRACE.span(kind):
+        with TRACE.span(kind) as span:
+            if details is not None:
+                span.update(details(args, kwargs))
             value = original(*args, **kwargs)
             if after is not None:
-                after(args, kwargs, value)
+                extra = after(args, kwargs, value)
+                if extra is not None:
+                    span.update(extra)
             return value
 
     measured._fastapi_diagnostic = True
@@ -166,11 +170,42 @@ def record_core(args, kwargs, result):
     )
 
 
+def report_details(signature):
+    def describe(args, kwargs):
+        values = signature.bind(*args, **kwargs).arguments
+        output_format = values.get("output_format")
+        if output_format == "total":
+            purpose = "total_only"
+        elif values.get("show_missing") is True and values.get("skip_covered") is True:
+            purpose = "term_missing_skip_covered"
+        else:
+            purpose = "other"
+        stream = values.get("file")
+        return {
+            "report_purpose": purpose,
+            "report_output_format_argument": output_format,
+            "report_show_missing_argument": values.get("show_missing"),
+            "report_skip_covered_argument": values.get("skip_covered"),
+            "report_ignore_errors_argument": values.get("ignore_errors"),
+            "report_precision_argument": values.get("precision"),
+            "report_stream_kind": getattr(stream, "__name__", type(stream).__name__),
+        }
+    return describe
+
+
+def report_result(args, kwargs, result):
+    return {"report_returned_total": result}
+
+
 def patch_coverage(module):
+    describe_report = report_details(inspect.signature(module.Coverage.report))
     for name in ("start", "stop", "save", "combine", "report",
                  "xml_report", "json_report", "_atexit"):
-        wrap_method(module.Coverage, name, f"coverage.{name}",
-                    record_core if name == "start" else None)
+        after = record_core if name == "start" else report_result if name == "report" else None
+        wrap_method(
+            module.Coverage, name, f"coverage.{name}", after=after,
+            details=describe_report if name == "report" else None,
+        )
 
 
 def patch_cov_engine(module):

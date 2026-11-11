@@ -25,7 +25,17 @@ def pytest_configure(config):
     if "pytest_cov.engine" not in sys.modules or config.pluginmanager.getplugin("_cov") is None:
         raise RuntimeError("The original pytest-cov controller is unavailable.")
     # Pytest can import its plugins through assertion rewriting, ahead of PathFinder.
-    diag_runtime.patch_cov_engine(sys.modules["pytest_cov.engine"])
+    engine = sys.modules["pytest_cov.engine"]
+    diag_runtime.patch_cov_engine(engine)
+    if not all(
+        getattr(method, "_fastapi_diagnostic", False) is True
+        for method in (engine.DistMaster.finish, engine.DistWorker.finish, engine.CovController.summary)
+    ):
+        raise RuntimeError("The actual pytest-cov controller hooks were not attached.")
+    timeout_plugin = sys.modules.get("pytest_timeout")
+    if timeout_plugin is None or not config.pluginmanager.is_registered(timeout_plugin):
+        raise RuntimeError("The original pytest-timeout plugin is unavailable.")
+    current.event("controller_hooks_attached")
     if os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS") != "2":
         raise RuntimeError("Diagnostics require exactly two workers.")
     if float(config.getini("timeout")) != 20:

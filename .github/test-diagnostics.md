@@ -78,6 +78,12 @@ silently assigned to a specific cause.
 In pytest-cov 7.1.0, `Coverage.report` runs once to obtain the total and again
 for the requested terminal report. Their combined time is not terminal printing
 alone; XML and JSON reports are separate calls. No report or gate is removed.
+The corrective diagnostic records the original bound arguments and returned
+coverage percentage of each `Coverage.report` call, distinguishing `total_only`
+from `term_missing_skip_covered`. Both calls still execute unchanged, and their
+individual wall/CPU intervals and counts are retained. The validator requires
+both purposes in order with equal returned totals, actual timeout set/cancel
+events for every item, and the real pytest-cov finish/summary envelopes.
 
 Missing/incomplete traces, mismatched worker count, missing correlated children,
 changed JUnit outcomes, and inconsistent monotonic boundaries are errors even
@@ -88,9 +94,11 @@ The initial diagnostic run `42840865672` passed both complete test manifests but
 failed trace verification: assertion-rewritten plugin imports bypassed the first
 import-based timeout/controller wrappers. Its underlying coverage method,
 worker/item and child traces remain evidence, but missing hooks are not zero
-cost and that run is not a complete successful diagnostic. The corrected
-registration above is covered by synthetic tests; another hosted measurement
-requires explicit approval rather than an automatic rerun.
+cost and that run is not a complete successful diagnostic. The user separately
+authorized one corrective two-job run on 2026-11-11. It uses a separate run and
+evidence directory and is not pooled with the first sample. The corrected
+registration is covered by synthetic tests; any further hosted measurement
+requires another explicit approval rather than an automatic retry.
 
 `scripts/diagnostics/verify_synthetic.py` uses only mocks and synthetic timelines.
 It lives outside `tests` and `scripts/tests` and is not added to the measured
