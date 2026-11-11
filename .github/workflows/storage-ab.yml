@@ -1,10 +1,21 @@
-name: Windows macOS ARM implementation diagnostic
+name: Windows ARM64 guarded storage A/B
 
 on:
+  push:
+    branches:
+      - lei9444-fastapi-platform-ci
+    paths:
+      - .github/workflows/storage-ab.yml
+      - .github/storage-ab.md
+      - scripts/storage_ab.py
+      - scripts/storage_ab.ps1
+      - scripts/storage_ab_core.psm1
+      - scripts/storage_ab_native.psm1
+      - scripts/tests/storage_ab_guards.ps1
+      - scripts/tests/test_storage_ab.py
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   UV_NO_SYNC: true
@@ -12,28 +23,35 @@ env:
   UV_PYTHON: "3.13.17"
   INLINE_SNAPSHOT_DEFAULT_FLAGS: review
   PYTHONUNBUFFERED: "1"
+  PLATFORM: windows-arm64
+  RUNNER_LABEL: windows-11-arm
+  EXPECTED_ARCHITECTURE: arm64
 
 jobs:
-  diagnostic:
-    name: Test diagnostic (${{ matrix.platform }})
+  trial:
+    name: Storage A/B (${{ matrix.layout }}, trial ${{ matrix.trial }})
+    runs-on: windows-11-arm
     timeout-minutes: 30
-    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: windows-arm64
-            runner: windows-11-arm
-          - platform: macos-arm64
-            runner: macos-15
+        layout: [default, refs-devdrive]
+        trial: [1, 2, 3]
     env:
-      PLATFORM: ${{ matrix.platform }}
-      RUNNER_LABEL: ${{ matrix.runner }}
+      STORAGE_LAYOUT: ${{ matrix.layout }}
+      STORAGE_TRIAL: ${{ matrix.trial }}
     steps:
+      - name: Reject unsupported runner context
+        if: ${{ !(runner.os == 'Windows' && runner.arch == 'ARM64' && runner.environment == 'github-hosted') }}
+        shell: pwsh
+        run: throw 'This experiment requires a GitHub-hosted Windows ARM64 runner.'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.UV_PYTHON }}
           architecture: arm64
@@ -41,21 +59,135 @@ jobs:
         with:
           version: "0.13.5"
           enable-cache: false
-      - name: Prepare the unchanged workload environment
-        run: python scripts/diagnostics/run_diagnostic.py prepare
-      - name: Validate synthetic instrumentation before measurement
-        run: uv run --no-sync python scripts/diagnostics/verify_synthetic.py
-      - name: One complete test invocation with buffered diagnostics
-        run: uv run --no-sync python scripts/diagnostics/run_diagnostic.py run
-      - name: Verify traces and publish this job's timing boundaries
-        if: ${{ !cancelled() }}
-        run: python scripts/diagnostics/analyze_diagnostic.py diagnostic-results
-      - name: Preserve all diagnostic evidence
+      - name: Parse native scripts and run fully mocked guard tests
+        shell: pwsh
+        run: ./scripts/tests/storage_ab_guards.ps1
+      - name: Check experimental code before native storage operations
+        shell: pwsh
+        env:
+          UV_CACHE_DIR: ${{ runner.temp }}/storage-ab-preflight-cache
+        run: |
+          $quality = Join-Path $env:RUNNER_TEMP 'storage-ab-preflight-venv'
+          foreach ($path in @($env:UV_CACHE_DIR, $quality)) {
+            if (Test-Path -LiteralPath $path) { throw 'Preflight tool/cache path already exists.' }
+          }
+          $bundle = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts'
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          @{quality_cache_initially_absent = $true; workload_cache_not_prepared = $true} |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $bundle 'preflight.json') -Encoding utf8
+          uv venv --python 3.13.17 $quality
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scripts = Join-Path $quality 'Scripts'
+          $python = Join-Path $scripts 'python.exe'
+          uv pip install --python $python ruff==0.16.8 ty==0.0.78 pytest==9.1.1 psutil==7.2.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $status = 0
+          & (Join-Path $scripts 'ruff.exe') check scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          if ($LASTEXITCODE -ne 0) { $status = 1 }
+          & (Join-Path $scripts 'ruff.exe') format --diff scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          if ($LASTEXITCODE -ne 0) { $status = 1 }
+          & (Join-Path $scripts 'ty.exe') check --python $python scripts/storage_ab.py scripts/tests/test_storage_ab.py
+          if ($LASTEXITCODE -ne 0) { $status = 1 }
+          exit $status
+      - name: Apply guarded experimental storage layout
+        id: storage
+        if: ${{ success() && runner.os == 'Windows' && runner.arch == 'ARM64' && runner.environment == 'github-hosted' }}
+        working-directory: ${{ runner.temp }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_OS: ${{ runner.os }}
+          STORAGE_RUNNER_ARCH: ${{ runner.arch }}
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STORAGE_EXPECTED_WORKSPACE: ${{ github.workspace }}
+          STORAGE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          $entry = Join-Path $env:STORAGE_EXPECTED_WORKSPACE 'scripts\storage_ab.ps1'
+          & $entry -Layout $env:STORAGE_LAYOUT -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $report
+      - name: Prepare dependencies and backend wheelhouse once
+        if: ${{ success() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        env:
+          STORAGE_WHEELHOUSE: ${{ steps.storage.outputs.wheelhouse }}
+        run: |
+          $storage = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          python -m scripts.storage_ab prepare --storage $storage --wheelhouse $env:STORAGE_WHEELHOUSE
+      - name: Verify actual venv, cache, temp, uv and protection state
+        if: ${{ success() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_OS: ${{ runner.os }}
+          STORAGE_RUNNER_ARCH: ${{ runner.arch }}
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STORAGE_EXPECTED_WORKSPACE: ${{ github.workspace }}
+          STORAGE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $storage = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          ./scripts/storage_ab.ps1 -Phase inspect -Layout $env:STORAGE_LAYOUT -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $storage
+      - name: Run one isolated build and complete test suite
+        if: ${{ success() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        env:
+          STORAGE_WHEELHOUSE: ${{ steps.storage.outputs.wheelhouse }}
+        run: |
+          $storage = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts\storage.json'
+          python -m scripts.storage_ab run --storage $storage --wheelhouse $env:STORAGE_WHEELHOUSE
+      - name: Stage workload evidence without caches or backups
+        if: ${{ always() && steps.storage.outputs.comparable == 'true' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'storage-ab-artifacts'
+          python -m scripts.storage_ab finalize --storage (Join-Path $bundle 'storage.json') --bundle $bundle
+      - name: Upload all trial evidence, including unapplied layouts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: test-diagnostic-${{ matrix.platform }}-${{ github.run_attempt }}
-          path: diagnostic-results
+          name: storage-ab-${{ matrix.layout }}-${{ matrix.trial }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-ab-artifacts
           include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    name: Aggregate storage A/B and full job timings
+    if: always()
+    needs: trial
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          architecture: x64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: storage-ab-*-${{ github.run_attempt }}
+          path: storage-ab-artifacts
+      - name: Read current-attempt workload job start/end metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '{total_count,jobs:[.jobs[]|{id,run_id,run_attempt,name,status,conclusion,started_at,completed_at,head_sha}]}' \
+            > storage-ab-jobs.json
+      - name: Publish strict A/B means and net job comparison
+        if: always()
+        env:
+          MATRIX_RESULT: ${{ needs.trial.result }}
+        run: python -m scripts.storage_ab report --output storage-ab-report
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: storage-ab-report-${{ github.run_attempt }}
+          path: |
+            storage-ab-report
+            storage-ab-jobs.json
           if-no-files-found: error
           retention-days: 7
