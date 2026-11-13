@@ -275,17 +275,15 @@ def pe_machine(data: bytes) -> int:
     return struct.unpack_from("<H", data, offset + 4)[0]
 
 
-def validate_httptools(data: dict, log: str) -> None:
+def validate_httptools_binary(data: dict) -> None:
     if (
-        data["version"] != HTTPTOOLS_VERSION
-        or data["installer"] != "uv"
+        data["installer"] != "uv"
         or data["wheel_tags"] != [HTTPTOOLS_TAG]
         or data["root_is_purelib"] != "false"
-        or data["uv_build_metadata_present"] is not False
         or data["direct_url_present"] is not False
         or data["workload_venv"] is not True
     ):
-        raise ValueError("httptools must be the pinned prebuilt native ARM64 wheel.")
+        raise ValueError("httptools must be a native ARM64 workload-venv installation.")
     extensions = data["extensions"]
     if (
         len(extensions) != len(HTTPTOOLS_EXTENSIONS)
@@ -300,6 +298,15 @@ def validate_httptools(data: dict, log: str) -> None:
         raise ValueError(
             "httptools native extensions or installed RECORD hashes differ."
         )
+
+
+def validate_httptools(data: dict, log: str) -> None:
+    validate_httptools_binary(data)
+    if (
+        data["version"] != HTTPTOOLS_VERSION
+        or data["uv_build_metadata_present"] is not False
+    ):
+        raise ValueError("httptools must be the pinned prebuilt native ARM64 wheel.")
     if re.search(r"(?m)^\s*(?:Building|Built) httptools(?:==|\s|@)", log):
         raise ValueError("The dependency log shows a source build of httptools.")
     if not re.search(
@@ -308,7 +315,7 @@ def validate_httptools(data: dict, log: str) -> None:
         raise ValueError("The cold installation of httptools is missing from its log.")
 
 
-def audit_httptools(output: Path) -> int:
+def read_httptools() -> dict:
     dist = distribution("httptools")
     prefix = Path(sys.prefix).resolve()
     files = dist.files
@@ -350,7 +357,7 @@ def audit_httptools(output: Path) -> int:
     if wheel_text is None or installer is None:
         raise ValueError("httptools WHEEL/INSTALLER metadata is unavailable.")
     wheel = Parser().parsestr(wheel_text)
-    evidence = {
+    return {
         "version": dist.version,
         "installer": installer.strip(),
         "wheel_tags": wheel.get_all("Tag", []),
@@ -361,6 +368,10 @@ def audit_httptools(output: Path) -> int:
         "workload_venv": prefix == Path(".venv").resolve(),
         "extensions": extensions,
     }
+
+
+def audit_httptools(output: Path) -> int:
+    evidence = read_httptools()
     isolated.write_json(output / "httptools.json", evidence)
     validate_httptools(evidence, (output / "dependencies.log").read_text("utf-8"))
     print(json.dumps(evidence, indent=2))

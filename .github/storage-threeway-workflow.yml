@@ -1,0 +1,176 @@
+name: Windows ARM64 storage and httptools three-condition reference
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  UV_NO_SYNC: true
+  UV_PYTHON_DOWNLOADS: never
+  UV_PYTHON: "3.13.17"
+  INLINE_SNAPSHOT_DEFAULT_FLAGS: review
+  PYTHONUNBUFFERED: "1"
+  PLATFORM: windows-arm64
+  RUNNER_LABEL: windows-11-arm
+  EXPECTED_ARCHITECTURE: arm64
+  LOOPS: "1"
+
+jobs:
+  trial:
+    name: Storage/httptools (${{ matrix.condition }}, trial ${{ matrix.trial }})
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        condition: [A-default-0.7.1, B-default-0.9.0, C-devdrive-0.9.0]
+        trial: [1, 2, 3]
+    env:
+      THREEWAY_CONDITION: ${{ matrix.condition }}
+      STORAGE_LAYOUT: ${{ matrix.condition == 'C-devdrive-0.9.0' && 'refs-devdrive' || 'default' }}
+      STORAGE_TRIAL: ${{ matrix.trial }}
+    steps:
+      - name: Reject unsupported runner context
+        if: ${{ !(runner.os == 'Windows' && runner.arch == 'ARM64' && runner.environment == 'github-hosted') }}
+        shell: pwsh
+        run: throw 'Only free standard GitHub-hosted native Windows ARM64 is supported.'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.UV_PYTHON }}
+          architecture: arm64
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+          enable-cache: false
+      - name: Select verified input and initialize only default cold caches
+        id: input
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'threeway-artifacts'
+          python -m scripts.storage_threeway initialize --bundle $bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Parse and exercise disk guards with fully mocked operations
+        if: ${{ matrix.condition == 'C-devdrive-0.9.0' }}
+        shell: pwsh
+        run: .\scripts\tests\storage_ab_guards.ps1
+      - name: Apply guarded experimental storage layout
+        id: storage
+        if: ${{ matrix.condition == 'C-devdrive-0.9.0' }}
+        working-directory: ${{ runner.temp }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_OS: ${{ runner.os }}
+          STORAGE_RUNNER_ARCH: ${{ runner.arch }}
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STORAGE_EXPECTED_WORKSPACE: ${{ github.workspace }}
+          STORAGE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'threeway-artifacts\storage.json'
+          $entry = Join-Path $env:STORAGE_EXPECTED_WORKSPACE 'scripts\storage_ab.ps1'
+          & $entry -Layout refs-devdrive -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $report
+      - name: Prepare once with identical tools, wheelhouse and installation audits
+        id: preparation
+        working-directory: ${{ steps.storage.outputs.workspace_physical || steps.input.outputs.workspace }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          THREEWAY_WHEELHOUSE: ${{ steps.storage.outputs.wheelhouse || steps.input.outputs.wheelhouse }}
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'threeway-artifacts'
+          python -m scripts.storage_threeway prepare --bundle $bundle --wheelhouse $env:THREEWAY_WHEELHOUSE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify treatment paths and retained protection state
+        if: ${{ matrix.condition == 'C-devdrive-0.9.0' }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_OS: ${{ runner.os }}
+          STORAGE_RUNNER_ARCH: ${{ runner.arch }}
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STORAGE_EXPECTED_WORKSPACE: ${{ github.workspace }}
+          STORAGE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'threeway-artifacts\storage.json'
+          .\scripts\storage_ab.ps1 -Phase inspect -Layout refs-devdrive -Trial ([int]$env:STORAGE_TRIAL) -Python $env:STORAGE_PYTHON -ReportPath $report
+      - name: Run one original isolated build and complete test suite
+        working-directory: ${{ steps.storage.outputs.workspace_physical || steps.input.outputs.workspace }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          THREEWAY_WHEELHOUSE: ${{ steps.storage.outputs.wheelhouse || steps.input.outputs.wheelhouse }}
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'threeway-artifacts'
+          python -m scripts.storage_threeway run --bundle $bundle --wheelhouse $env:THREEWAY_WHEELHOUSE
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage evidence without caches, venvs, hostnames or backups
+        if: ${{ always() && steps.input.outcome == 'success' && (matrix.condition != 'C-devdrive-0.9.0' || steps.storage.outputs.comparable == 'true') }}
+        working-directory: ${{ steps.storage.outputs.workspace_physical || steps.input.outputs.workspace }}
+        shell: pwsh
+        env:
+          STORAGE_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP 'threeway-artifacts'
+          python -m scripts.storage_threeway finalize --bundle $bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload the individual trial including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: threeway-${{ matrix.condition }}-${{ matrix.trial }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/threeway-artifacts
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    name: Aggregate the nine trials and full job timings
+    if: always()
+    needs: trial
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13.17"
+          architecture: x64
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: threeway-*-${{ github.run_attempt }}
+          path: threeway-artifacts
+      - name: Read current-attempt workload start and end timestamps
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '{total_count,jobs:[.jobs[]|{id,run_id,run_attempt,name,status,conclusion,started_at,completed_at,head_sha}]}' \
+            > threeway-jobs.json
+      - name: Publish all samples, arithmetic means and qualified contrasts
+        if: always()
+        env:
+          MATRIX_RESULT: ${{ needs.trial.result }}
+        run: python -m scripts.storage_threeway report --output threeway-report
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: threeway-report-${{ github.run_attempt }}
+          path: |
+            threeway-report
+            threeway-jobs.json
+          if-no-files-found: error
+          retention-days: 7
